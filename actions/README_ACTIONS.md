@@ -60,7 +60,13 @@ to files and only read back by `parse_report.py`, never printed.
 1. Create a new **private** repository, e.g. `BH3GEI/arcbench-grader-demo`.
 2. Copy the contents of this repo's `actions/template/` directory into the
    new repo's root and push to `main`.
-3. Add repo secrets (Settings -> Secrets and variables -> Actions):
+3. Add repo secrets (Settings -> Secrets and variables -> Actions) — see
+   "Secrets & least privilege" below for how to scope each one:
+   - `SELFTEST_DISPATCH_SIGNING_KEY` — shared HMAC secret, same value on the
+     self-test service and in this repo. Authenticates dispatches *and*
+     is how per-team quota lands on the Actions side — see "Submitter
+     identity & quota". Strongly recommended for production; the check
+     silently no-ops if unset (useful for local testing only).
    - `SELFTEST_CALLBACK_TOKEN` — bearer token the self-test service expects
      on its results-intake endpoint. Optional: omit it and the grader falls
      back to publishing a GitHub Release (`result-<submission_id>`) with
@@ -78,8 +84,8 @@ to files and only read back by `parse_report.py`, never printed.
 
 ## Importing an arcbench task
 
-Task folders use the same shape as arcbench already does — copy one in
-as-is, no reformatting:
+Task folders use the same shape as arcbench already does — one command
+imports a folder in as-is, no manual reformatting:
 
 ```
 tasks/<task_id>/
@@ -92,20 +98,30 @@ tasks/<task_id>/
     *.spec.ts
 ```
 
-Steps:
+```
+cd <grader-repo-clone>
+python3 scripts/import_task.py /path/to/arcbench/task --task-id my-task --visibility public
+git commit -m "Import task my-task" && git push
+```
 
-1. `cp -r <arcbench-task-folder> tasks/<task_id>` in the grader repo.
-2. Make sure `requirements.yaml` is a **flat** `key: value` list (the grader
-   parses it with `grep`/`cut`, not a YAML library, to avoid extra installs
-   on the runner) with at least `visibility: public` or `visibility:
-   hidden`. Copy the other fields from `tasks/demo-todo/requirements/requirements.yaml`
-   (`app_port`, `build_timeout_s`, `ready_timeout_s`, `run_timeout_s`) and
-   adjust per task if needed — if your arcbench `requirements.yaml` is
-   nested, flatten just these fields into a sibling file or swap
-   `scripts/grade.sh`'s `req()` lookup for a real YAML parser (`pip install
-   pyyaml` in a setup step).
-3. `git add tasks/<task_id> && git commit && git push`.
-4. Trigger a run with that `task_id` to confirm it grades.
+`scripts/import_task.py` reads the arcbench task's own `requirements.yaml`
+(whatever shape — nested, differently-named fields are fine, it uses PyYAML:
+`pip install pyyaml` if missing) and derives this grader's flat
+`requirements.yaml`, filling in `app_port`/`build_timeout_s`/
+`ready_timeout_s`/`run_timeout_s` with sane defaults for anything the source
+doesn't specify. It copies `requirements.md`, `reference/`, `assets/` and
+`tests/*.spec.ts` across unchanged, stages the result with `git add`, and
+**refuses to run** if the destination repo's git remote looks like this
+public demo repo — real task content only ever goes to a private grader
+repo. Review the diff it stages (especially `visibility` and the timeouts)
+before committing; `--visibility` is required unless the source file already
+has one.
+
+Equivalent manual steps, if you'd rather not use the script: copy the folder
+to `tasks/<task_id>`, hand-write a flat `requirements.yaml` with at least
+`visibility: public|hidden` (the grader parses it with `grep`/`cut`, not a
+YAML library, to keep the Actions runner dependency-free), commit, push,
+trigger a run with that `task_id` to confirm it grades.
 
 Nothing else changes — `requirements.md`, `reference/`, `assets/` are carried
 along for human reference but are not read by the grader itself; only
@@ -127,11 +143,122 @@ path without editing a task's file — intended for testing the grader itself,
 not for production use (`repository_dispatch` payloads should rely on the
 task's own setting).
 
+## Submitter identity & quota
+
+`repository_dispatch` can be called by anyone holding a token with write
+access to the grader repo — in production that should only ever be the
+self-test service's own credential, but the grader checks anyway
+(`scripts/verify_signature.py`, called first thing in `grade.sh`):
+
+- The self-test service signs `"{submission_id}.{task_id}.{timestamp}"` with
+  HMAC-SHA256 using the shared `SELFTEST_DISPATCH_SIGNING_KEY`, **only after
+  its own `quota.try_consume()` succeeds**, and sends `submission_timestamp`
+  + `submission_signature` (hex digest) in `client_payload`.
+- The grader recomputes the HMAC and rejects (status `error`, detail
+  `"dispatch rejected: ..."`) if it doesn't match, or if the timestamp is
+  more than 300s old (replay protection) — no build, no run, no callback to
+  the (now untrusted) `callback_url`.
+- This is also where **per-team daily quota lands on the Actions side**: a
+  valid, fresh signature is itself proof quota was already checked
+  server-side. The grader deliberately does not re-implement a stateful
+  per-team counter — that logic (and its storage) stays exactly where it
+  already is, in `server/app/quota.py`, which both channels share.
+- The same key signs the outbound callback too (`X-Signature: sha256=...`
+  header on the `CALLBACK_URL` POST, in `report_back.py`), so the self-test
+  service can confirm a result actually came from this grader.
+- No key configured → the check no-ops (always passes). That's intentional
+  for local `workflow_dispatch` testing; set the secret before going live.
+
+## Concurrency, resource limits & retries
+
+- **Concurrency**: a `prepare` job hashes `submission_id` into one of
+  `GRADE_LANES` (default 4, set in `grade.yml`) lanes; the `grade` job's
+  `concurrency: group: grade-lane-<N>` serializes within a lane. This bounds
+  total parallelism to `GRADE_LANES` regardless of burst size, and
+  incidentally re-dispatching the same `submission_id` always serializes
+  against its own earlier run (same hash → same lane). Raise `GRADE_LANES` to
+  trade isolation-per-lane for more throughput, within whatever concurrent-job
+  limit your GitHub plan/org allows.
+- **Timeouts**: per-task `build_timeout_s`/`ready_timeout_s`/`run_timeout_s`
+  from `requirements.yaml` (defaults 600/60/900s), plus a job-level
+  `timeout-minutes: 20` backstop in `grade.yml` in case something hangs
+  outside those three checkpoints.
+- **Resource caps**: app container — 512MB memory (swap capped equal, so it
+  can't page around the limit), 1 CPU, 256 pids, read-only root fs with a
+  64MB noexec `/tmp`, `no-new-privileges`, a handful of Linux capabilities
+  dropped, log output capped (`--log-opt max-size=10m --log-opt max-file=1`).
+  Runner container — 2GB memory, 2 CPUs, 1024 pids, `no-new-privileges`.
+- **Download caps**: HTTPS only (`--proto =https`), 100MB max file size,
+  120s max transfer time — a hostile or broken `download_url` can't fill the
+  job's disk or hang it indefinitely.
+- **Retries**: only for infra calls that have nothing to do with the
+  submission's own correctness — downloading the app zip, pulling a
+  prebuilt `GRADER_RUNNER_IMAGE` (3 attempts, 5s apart). Building the
+  submitted app and running its tests are never retried: a flaky network
+  shouldn't get 3 tries disguised as 1, and a genuinely broken submission
+  shouldn't get extra attempts either. If a run fails on infra flakiness,
+  the self-test service re-dispatches (same `submission_id` → same lane, so
+  no pile-up).
+- **Cleanup**: a `trap cleanup EXIT` in `grade.sh` always removes the app
+  container, runner container, network and app image by name — runs even on
+  early failure. Debug artifacts (`.gradework/results`, build/app/runner
+  logs + `result.json`) upload with `retention-days: 3`. Result releases
+  (`result-<submission_id>`) have no automatic expiry; prune old ones
+  periodically, e.g. `gh release list -R <org>/<grader-repo> --limit 200 |
+  awk '{print $3}' | xargs -n1 gh release delete -R <org>/<grader-repo>
+  --yes` for ones past your retention window.
+
+## Secrets & least privilege
+
+- `SELFTEST_DISPATCH_SIGNING_KEY` / `SELFTEST_CALLBACK_TOKEN` — random
+  secrets you generate (e.g. `openssl rand -hex 32`), not derived from any
+  account's credentials. Rotate by updating both sides together.
+- `APP_DOWNLOAD_TOKEN` — scope this to **read-only access to wherever app
+  zips are stored**, nothing else. Do not reuse a personal PAT with full
+  `repo` scope here (the verification run for this template used one for
+  convenience, documented in "Verified run" below — don't copy that part).
+  A fine-grained PAT scoped to just the storage location/repo, or a signed
+  URL from object storage, is the production shape.
+- The self-test service's own dispatch credential needs exactly: write
+  access to the grader repo (to call the `dispatches` API) — nothing else.
+  A GitHub App installed only on the grader repo, or a fine-grained PAT
+  scoped to that one repo, both work; a classic PAT with org-wide `repo`
+  scope is more than necessary.
+- `GITHUB_TOKEN` (the job's own, automatic, never a stored secret): scoped
+  per job in `grade.yml` — `prepare` gets `contents: read` (it doesn't even
+  check out the repo), `grade` gets `contents: write` (needed only for the
+  fallback Release). Neither job gets `actions:`, `issues:`, `packages:`, or
+  anything else — GitHub denies every permission not explicitly listed once
+  you specify a `permissions:` map.
+- Both `checkout@v4` steps set `persist-credentials: false` so the job token
+  never sits in `.git/config` on disk, where the process tree building an
+  untrusted submission could otherwise reach it.
+
+## Cost / usage estimate
+
+GitHub-hosted `ubuntu-latest` runners: a `demo-todo`-sized run (4-5 tests,
+rebuilding the Playwright image each time) takes roughly 1-4 minutes of
+job time depending on whether a test times out. Rough minutes/month:
+
+```
+minutes/month ≈ submissions/day × avg_run_minutes × 30
+```
+
+At 10 submissions/team/day (the existing default daily limit) and, say, 20
+teams: 200 submissions/day × ~2 min average × 30 ≈ 12,000 minutes/month.
+Private repos get 2,000-50,000 free minutes/month depending on plan (GitHub
+Free: 2,000; Team: 3,000; Enterprise: 50,000), billed per-minute beyond that
+at standard GitHub Actions rates. Two easy levers to cut this: set
+`GRADER_RUNNER_IMAGE` to a prebuilt image (saves ~1-2 min/run of Playwright
+install) and/or require re-submission cooldowns upstream in the self-test
+service (already true via the existing daily quota).
+
 ## What stays the same as the local channel
 
-- **Quota**: unchanged. The self-test service's existing per-team daily
-  limit (`server/app/quota.py`) is checked before a submission is ever
-  dispatched to Actions; the grader repo has no quota logic of its own.
+- **Quota**: authority unchanged — still `server/app/quota.py`'s per-team
+  daily limit, checked before a submission is ever dispatched. What's new on
+  the Actions side is the signed-dispatch proof described above, not a
+  second counter.
 - **Isolation shape**: isolated build, no-network app container, a separate
   test runner container reaching the app only via `BASE_URL`, same Playwright
   version pin as `runner/Dockerfile` in this repo.
@@ -143,15 +270,90 @@ task's own setting).
 - The Playwright runner image is built fresh each run (~1-2 min) unless
   `GRADER_RUNNER_IMAGE` is set to a prebuilt image reference (push one to
   GHCR once per Playwright version bump and set that env in the workflow).
-- `requirements.yaml` parsing is intentionally flat-only; nested arcbench
-  configs need the parser swap noted above.
+- The grader-side `requirements.yaml` stays flat on purpose (parsed with
+  `grep`/`cut`, no runner dependency); `scripts/import_task.py` is what
+  absorbs arbitrary nested arcbench shapes at import time, not the grader.
 - No automatic screenshot-on-failure artifact upload in this template (the
   report still includes the error message for `visibility: public` tasks).
 - A repo collaborator with write/read access to the grader repo can still
   see task content and run results directly — the isolation here is "no
   participant access to this repo," not a sandbox against repo admins.
+- `GRADE_LANES` bounds parallelism but isn't a real queue: two unrelated
+  submissions that hash to the same lane wait on each other, and there's no
+  priority or fairness — fine at the scale this template targets, not a
+  substitute for a proper job queue at much higher volume.
 - GitHub Actions concurrent-job and monthly-minutes limits apply like any
   other workflow; very high submission volume may need self-hosted runners.
+
+## 上线清单
+
+- [ ] 私有 grader 仓库已从 `actions/template/` 初始化，且确认其 git remote
+      不是本公开仓库（`scripts/import_task.py` 会自动拒绝写入看起来像公开仓库的目标）。
+- [ ] 三个 secrets 已按「Secrets & least privilege」配置且权限最小化：
+      `SELFTEST_DISPATCH_SIGNING_KEY`、`SELFTEST_CALLBACK_TOKEN`（或改用私有
+      Release 兜底）、`APP_DOWNLOAD_TOKEN`（若需要，建议只读、限定存储位置，
+      不要用个人完整 `repo` scope 的 token）。
+- [ ] 自测服务侧的 dispatch 凭证（GitHub App 或 PAT）只拥有对 grader 仓库发
+      `repository_dispatch` 所需的最小权限，且只存在服务端，不进 grader 仓库。
+- [ ] `SELFTEST_DISPATCH_SIGNING_KEY` 在自测服务与 grader 仓库两侧为同一值，
+      且确认自测服务只在 `quota.try_consume()` 成功后才签名、带新鲜 timestamp。
+- [ ] 每道正式题目都用 `scripts/import_task.py` 导入，并至少跑过一次真实
+      run（好 app、坏 app 各一次）确认链路通。
+- [ ] `GRADER_RUNNER_IMAGE`（可选）已指向预构建镜像，避免每次评测都重新装
+      Playwright/Chromium；或接受首次构建的 1-2 分钟开销。
+- [ ] `GRADE_LANES`（默认 4）与预期并发提交量匹配，并结合组织的 Actions
+      并发 job 上限一起估算过吞吐（见「Cost / usage estimate」）。
+- [ ] 回归验证：好 / 坏 / hidden / 部分通过 / 签名错误被拒 均按预期表现——
+      结果见下方「Verified run」。
+- [ ] README 中列出的 secrets 名称与仓库实际配置的 secrets 一致，且没有遗留
+      验证阶段临时用的个人 token（本模板验证时用过一个，已在下方「Verified
+      run」里注明，正式上线前应替换）。
+
+## 运维
+
+**监控看哪里**
+
+- 每次评测的 Actions run 列表：`gh run list -R <org>/<grader-repo>`。run 的
+  success/failure 只反映「评测流程本身是否跑完」，不等于「题目是否通过」——
+  是否通过看 `result.json` 的 `passed/total`；run failure 可能是选手 app 真
+  的没通过测试，也可能是下载失败/app 未就绪等 infra 问题（区别在 `detail`
+  字段的文字）。
+- 结果交付：未配置 `CALLBACK_URL` 时用 `gh release list -R
+  <org>/<grader-repo>`；配置了的话看自测服务自己的回调接收日志。
+- 用量/配额：GitHub 组织的 Actions usage 页面（分钟数、并发 job 数）+
+  自测服务自身的配额使用情况（`GET /api/quota`，见仓库根 README）。
+
+**出故障怎么处理**
+
+- `detail` 是 infra 类报错（`download failed` / `app did not become ready
+  within Ns` / `runner exited N without a report` / `app build failed or
+  exceeded Ns`）→ 先下载该 run 的 `debug-<submission_id>` artifact（保留 3
+  天），看 `build.log` / `app.log` / `runner.log`；多数是选手 app 本身的问
+  题，不是 grader 的 bug。
+- `detail` 以 `dispatch rejected:` 开头 → 签名或新鲜度问题。先确认自测服务
+  与 grader 仓库两侧 `SELFTEST_DISPATCH_SIGNING_KEY` 是否一致，再检查服务端
+  签名时间戳是否有明显时钟偏移（默认容忍窗口 300 秒，见
+  `scripts/verify_signature.py` 的 `--max-age-s`）。
+- 整体吞吐变慢、submission 排队明显 → 检查是不是同一个 `submission_id` 被
+  重复 dispatch（会一直排在同一 lane 里串行），或是已经顶到组织的 Actions
+  并发 job 上限；必要时调大 `GRADE_LANES`。
+- Playwright/Chromium 相关的 runner 镜像构建失败 → 多为上游 `node`/
+  `playwright` 基础镜像变更，先本地 `docker build ./runner` 复现；临时缓解
+  可把 `runner/Dockerfile` 里的 `PLAYWRIGHT_VERSION` 锁定到上一个已知可用
+  版本，或切到一个提前验证过的 `GRADER_RUNNER_IMAGE`。
+
+**怎么回滚**
+
+- grader 仓库是独立的 git 仓库，每次改动都是一个 commit：`git revert
+  <bad-commit>` 是首选（私有仓库、无下游 fork，`git reset --hard
+  <last-good> && git push --force-with-lease` 也可以，但 revert 更安全、留
+  痕迹）。
+- 某道题目导入错了（如 `visibility` 弄反、内容有误）→ 用
+  `scripts/import_task.py ... --force` 重新导入覆盖，或直接 `git revert`
+  那次导入对应的 commit。
+- 工作流本身（`grade.yml` / `scripts/*`）改坏了 → 先用 `workflow_dispatch`
+  手动跑一次 `demo-todo` 的好 / 坏两种 app，确认链路恢复正常，再对正式题目
+  放量。
 
 ## Verified run
 
