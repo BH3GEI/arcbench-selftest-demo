@@ -89,7 +89,9 @@ class DockerOps:
             detach=True,
             name=name,
             network=network,
-            network_aliases=["app"],
+            # docker-py has no network_aliases kwarg; aliases go through
+            # the endpoint config of the network being joined.
+            networking_config={network: self.client.api.create_endpoint_config(aliases=["app"])},
             environment={"PORT": str(cfg.app_port)},
             mem_limit=cfg.app_mem,
             memswap_limit=cfg.app_mem,
