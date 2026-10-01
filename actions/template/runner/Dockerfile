@@ -23,16 +23,13 @@ COPY playwright.config.js wait-ready.mjs run.sh /opt/selftest/
 RUN chmod +x /opt/selftest/run.sh \
     && chown -R node:node /opt/selftest
 
-# Chromium refuses its own sandbox when launched as root (no privileges left
-# to drop), which is why a root Playwright container usually either crashes
-# or gets `--no-sandbox` bolted on — the latter gives a browser exploit a
-# much easier path to the host-adjacent container (docs/security-review.md
-# open item #3). Running as the image's unprivileged `node` user (uid 1000)
-# is necessary for Chromium's namespace sandbox, but not sufficient: Ubuntu
-# 23.10+ disables unprivileged user namespaces by default via AppArmor
-# (confirmed by a real "No usable sandbox!" failure against GitHub's
-# ubuntu-latest — docs/parity.md), so `scripts/grade.sh`'s `docker run` for
-# this image also needs `--security-opt apparmor=unconfined`.
+# Still runs as the image's unprivileged `node` user (uid 1000), not root —
+# meaningful defense in depth on its own even though it turned out not to be
+# sufficient for Chromium's own sandbox (see playwright.config.js: Ubuntu
+# 23.10+ disables the unprivileged user namespaces that sandbox needs,
+# confirmed by a real "No usable sandbox!" failure against GitHub's
+# ubuntu-latest that `--security-opt apparmor=unconfined` did not fix —
+# docs/parity.md, docs/security-review.md open item #3).
 USER node
 
 ENTRYPOINT ["/opt/selftest/run.sh"]

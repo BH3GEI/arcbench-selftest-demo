@@ -39,7 +39,7 @@ special skill; **Medium** = DoS or needs a second weakness; **Low** = hygiene.
 |---|---|---|
 | 1 | Docker socket on the internet-facing process | **Split, not eliminated** — `SELFTEST_ROLE=api`\|`worker` (`server/app/config.py`, `server/app/jobs.py`, new `server/app/worker.py`). The `api` process serves HTTP and never imports/constructs `DockerOps`; `compose.yml`'s default topology is now two services — `api` (no Docker socket, `127.0.0.1`-only port) and `worker` (has the socket, no exposed port at all). A compromise of `api` no longer gets the socket for free. This is *not* the stronger recommendation (separate VM / gVisor / socket proxy) — still open if that level of isolation is needed. |
 | 2 | Build timeout doesn't stop the build | `DockerOps.build_image` now shells out to the `docker` CLI via `subprocess.run(..., timeout=...)` instead of the SDK's `images.build()` (which only stopped *our wait*, not the daemon's work — confirmed by reading how `images.build()` blocks until the whole build finishes before returning anything to iterate). Killing the CLI on timeout drops its connection to the daemon, which aborts the build with it — the same mechanism `grade.sh` already used. Also added `--memory`/`--memory-swap`/`--cpu-quota` on the build itself (`SELFTEST_BUILD_MEM`/`BUILD_CPUS`), not just the resulting container. |
-| 3 (partial) | Runner/Chromium isolation | The runner (`runner/Dockerfile`, `actions/template/runner/Dockerfile`) now drops to a non-root user via `gosu` for the step that actually launches Chromium against participant-controlled pages, and `playwright.config.js` sets `chromiumSandbox: true` explicitly rather than relying on the default. "Mount only the current task's tests" was already true before this pass (`host_tests_dir = host_tasks_dir/task_id/tests`, not the whole tasks tree) as a side effect of the task-format parity work in `docs/parity.md`. Not done: a seccomp profile tuned for the sandbox, or isolating the runner on its own disposable host. |
+| 3 (partial) | Runner/Chromium isolation | The runner (`runner/Dockerfile`, `actions/template/runner/Dockerfile`) now drops to a non-root user (via `gosu` / Dockerfile `USER node`) for the step that actually launches Chromium against participant-controlled pages. `chromiumSandbox: true` was tried first but is **not usable on the actual target environment**: GitHub's `ubuntu-latest` (Ubuntu 24.04, same restriction on Ubuntu 23.10+) disables unprivileged user namespaces by default via AppArmor, confirmed by a real `FATAL: ... No usable sandbox!` failure during end-to-end verification (`docs/parity.md`) — `--security-opt apparmor=unconfined` on the container did not restore it either. `chromiumSandbox: false` is the deliberate, tested fallback; the non-root user, the internal (no-internet) network, and `no-new-privileges` remain as the actual defense-in-depth layers. "Mount only the current task's tests" was already true before this pass (`host_tests_dir = host_tasks_dir/task_id/tests`, not the whole tasks tree) as a side effect of the task-format parity work. Not done: a seccomp profile or kernel setting that would actually re-enable the sandbox, or isolating the runner on its own disposable host. |
 | 8 | Token in query string | Removed the `?token=` fallback from `/logs/{kind}` and `/artifact` entirely (`server/app/main.py`) — callers authenticate via `X-Team-Token` or, in `github` auth mode, the session cookie (sent automatically by the browser, including for plain `fetch()`/`<img>` loads — `server/app/static/index.html` now fetches screenshots via `fetch()` + object URL instead of a `src=...&token=...` URL). |
 | 9 (partial) | No TLS, port on all interfaces | `compose.yml`'s `api` service now binds `127.0.0.1:8080` instead of `0.0.0.0:8080`; `SELFTEST_FORCE_HTTPS=1` adds a middleware that 400s any request a reverse proxy reports as plain HTTP and marks the session/state cookies `Secure`. Still needs an actual reverse proxy in front for a real deployment — `deploy/Caddyfile`/`deploy/nginx.conf.example` were already present (prior pass). |
 | — | Auth was team-token-only | Added `SELFTEST_AUTH_MODE=github` (`server/app/oauth_github.py`, `server/app/auth.py`'s `GitHubCookieAuth`) per a product decision to run the server's participant-facing login as GitHub OAuth, matching `actions/web/`'s identity (GitHub numeric account id) so quota means the same thing on both channels. Session cookie is a small stdlib-only signed payload (`sign_session`/`verify_session`, HMAC-SHA256, no third-party crypto dependency), httponly, `Secure` under `SELFTEST_FORCE_HTTPS`. The GitHub access token is used once server-side to fetch the profile, then discarded — never put in the cookie. |
@@ -77,17 +77,24 @@ rather than on this machine.
    (`SELFTEST_BUILD_MEM`/`BUILD_CPUS`). Still open on both: Docker's data
    root isn't on a size-limited volume, no base-image allowlist.
 3. ~~**The runner container holds the whole test pack while its Chromium
-   loads participant-controlled pages.**~~ **Fixed on both channels**:
-   Actions — see F16 (runs as the image's unprivileged `node` user). Server
-   — `runner/Dockerfile` now drops to a non-root user via `gosu` for the
-   step that actually launches Chromium; both channels set
-   `chromiumSandbox: true` explicitly. The mount was already scoped to just
+   loads participant-controlled pages.**~~ **Partially fixed on both
+   channels**: Actions — see F16 (runs as the image's unprivileged `node`
+   user). Server — `runner/Dockerfile` now drops to a non-root user via
+   `gosu` for the step that actually launches Chromium. Both channels tried
+   `chromiumSandbox: true` first, but it's not usable on the actual target
+   environment (GitHub's `ubuntu-latest`/Ubuntu 24.04 disables unprivileged
+   user namespaces by default — confirmed via a real `FATAL: ... No usable
+   sandbox!` failure during end-to-end verification, `docs/parity.md`;
+   `--security-opt apparmor=unconfined` did not restore it), so both ended
+   up on `chromiumSandbox: false` as the tested, deliberate fallback — the
+   non-root user, internal network, and `no-new-privileges` are the actual
+   remaining defense-in-depth layers. The mount was already scoped to just
    the current task's tests on both channels (never the whole pack tree),
    a side effect of the task-format parity work (`docs/parity.md`). Still
-   open: a seccomp profile tuned for the sandbox; `/results` is necessarily
-   still writable by the non-root user (that's where the report/screenshots
-   get written) — the boundary that matters is that it's no longer root
-   doing the writing.
+   open: a seccomp profile or kernel setting that would actually re-enable
+   the sandbox; `/results` is necessarily still writable by the non-root
+   user (that's where the report/screenshots get written) — the boundary
+   that matters is that it's no longer root doing the writing.
 4. ~~**GITHUB_TOKEN has `contents: write` in the same job that builds and
    runs untrusted code.**~~ Fixed — see F15 (`prepare`/`grade`/`report`
    split). No equivalent concept on the server channel (no `GITHUB_TOKEN`

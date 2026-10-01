@@ -143,21 +143,10 @@ class DockerOps:
             mem_limit="2g",
             nano_cpus=int(2 * 1e9),
             pids_limit=1024,
-            # apparmor=unconfined: Ubuntu 23.10+ disabled unprivileged user
-            # namespaces by default (AppArmor), which is exactly what
-            # Chromium's own (non-setuid-root) sandbox needs as the
-            # non-root `runner` user — without this, Chromium's zygote
-            # fails with "No usable sandbox!" and every test errors out.
-            # Confirmed against a real run on GitHub's ubuntu-latest
-            # (docs/parity.md) — contrary to the assumption that GH-hosted
-            # runners support this out of the box. This scopes the
-            # relaxation to just this one container, not the host.
-            security_opt=["no-new-privileges", "apparmor=unconfined"],
-            # Docker's default /dev/shm is 64m; Chromium needs more for its
-            # own shared memory or it crashes on launch ("Target page,
-            # context or browser has been closed") — a well-known Docker+
-            # Chromium gotcha, confirmed by a real failure in the GitHub
-            # Actions verification run (docs/parity.md).
+            security_opt=["no-new-privileges"],
+            # Docker's default /dev/shm is 64m; Chromium wants more for its
+            # own shared memory even with --disable-dev-shm-usage (which
+            # Playwright already passes by default).
             shm_size="1g",
             log_config=CAPPED_LOGS,
             labels={cfg.label: job_id},

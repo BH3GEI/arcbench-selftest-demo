@@ -12,9 +12,15 @@ module.exports = {
     headless: true,
     baseURL: process.env.BASE_URL,
     screenshot: 'only-on-failure',
-    // Explicit, not just relying on Playwright's default: never disable the
-    // browser's own sandbox even though we also run as a non-root user
-    // (run.sh) and restrict the mount to this task's own tests only.
-    launchOptions: { chromiumSandbox: true },
+    // Chromium's own sandbox needs unprivileged user namespaces, which
+    // Ubuntu 23.10+ disables by default (AppArmor) — confirmed via a real
+    // "FATAL: ... No usable sandbox!" failure on GitHub's ubuntu-latest,
+    // and `--security-opt apparmor=unconfined` on the container did NOT
+    // restore it (docs/parity.md, docs/security-review.md open item #3).
+    // Falling back to Chromium's own suggested workaround; the container
+    // itself still runs as a non-root user (run.sh), on an internal
+    // (no-internet) network, with no-new-privileges — defense in depth
+    // that doesn't depend on this one layer.
+    launchOptions: { chromiumSandbox: false },
   },
 };
