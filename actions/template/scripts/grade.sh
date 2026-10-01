@@ -188,9 +188,12 @@ if [ -z "$DETAIL" ]; then
   # tests dir (different container, no shared mount), and the runner never
   # sees the app's source (only BASE_URL over the internal network). Runs as
   # a non-root user (see runner/Dockerfile) so Chromium's own sandbox is
-  # actually available instead of needing --no-sandbox; $RESULTS is made
-  # world-writable first since that non-root uid otherwise can't write into
-  # a host bind-mount owned by whatever uid this job happens to run as.
+  # available instead of needing --no-sandbox — that alone isn't enough on
+  # Ubuntu 23.10+ though, which disables unprivileged user namespaces by
+  # default (AppArmor), hence --security-opt apparmor=unconfined below,
+  # scoped to just this one container. $RESULTS is made world-writable
+  # first since that non-root uid otherwise can't write into a host
+  # bind-mount owned by whatever uid this job happens to run as.
   chmod -R o+rwX "$RESULTS"
   if [ -n "${GRADER_RUNNER_IMAGE:-}" ]; then
     RUNNER_IMAGE="$GRADER_RUNNER_IMAGE"
@@ -216,6 +219,7 @@ if [ -z "$DETAIL" ]; then
       -e "READY_TIMEOUT=$READY_TIMEOUT_S" \
       --memory=2g --cpus=2.0 --pids-limit=1024 \
       --security-opt no-new-privileges \
+      --security-opt apparmor=unconfined \
       --shm-size=1g \
       -v "$TESTS_DIR:/pack:ro" \
       -v "$RESULTS:/results" \

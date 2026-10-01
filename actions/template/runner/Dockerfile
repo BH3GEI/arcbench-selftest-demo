@@ -28,9 +28,11 @@ RUN chmod +x /opt/selftest/run.sh \
 # or gets `--no-sandbox` bolted on — the latter gives a browser exploit a
 # much easier path to the host-adjacent container (docs/security-review.md
 # open item #3). Running as the image's unprivileged `node` user (uid 1000)
-# instead lets Chromium's namespace sandbox actually engage, with no extra
-# `--cap-add`/seccomp changes needed on a kernel with unprivileged user
-# namespaces (the default on the GitHub-hosted Actions runner this targets).
+# is necessary for Chromium's namespace sandbox, but not sufficient: Ubuntu
+# 23.10+ disables unprivileged user namespaces by default via AppArmor
+# (confirmed by a real "No usable sandbox!" failure against GitHub's
+# ubuntu-latest — docs/parity.md), so `scripts/grade.sh`'s `docker run` for
+# this image also needs `--security-opt apparmor=unconfined`.
 USER node
 
 ENTRYPOINT ["/opt/selftest/run.sh"]
