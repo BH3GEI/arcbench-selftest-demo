@@ -216,6 +216,7 @@ if [ -z "$DETAIL" ]; then
       -e "READY_TIMEOUT=$READY_TIMEOUT_S" \
       --memory=2g --cpus=2.0 --pids-limit=1024 \
       --security-opt no-new-privileges \
+      --shm-size=1g \
       -v "$TESTS_DIR:/pack:ro" \
       -v "$RESULTS:/results" \
       "$RUNNER_IMAGE" > "$RESULTS/runner.log" 2>&1

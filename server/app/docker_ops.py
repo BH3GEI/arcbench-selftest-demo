@@ -144,6 +144,12 @@ class DockerOps:
             nano_cpus=int(2 * 1e9),
             pids_limit=1024,
             security_opt=["no-new-privileges"],
+            # Docker's default /dev/shm is 64m; Chromium needs more for its
+            # own shared memory or it crashes on launch ("Target page,
+            # context or browser has been closed") — a well-known Docker+
+            # Chromium gotcha, confirmed by a real failure in the GitHub
+            # Actions verification run (docs/parity.md).
+            shm_size="1g",
             log_config=CAPPED_LOGS,
             labels={cfg.label: job_id},
         )
