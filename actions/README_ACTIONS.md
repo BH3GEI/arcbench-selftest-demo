@@ -392,6 +392,20 @@ signature computed the same way the self-test service would.
   attempted. Run (job fails fast, ~45s, no build/run steps execute):
   https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36866133193
   Result: `{"status":"error","detail":"dispatch rejected: signature mismatch"}`
+- **Real stage-1 task import** — `scripts/import_task.py` against an actual
+  first-stage task folder (12 spec files + a shared support helper, flat
+  `requirements.yaml` directly under the task root rather than nested in a
+  `requirements/` dir — a layout the script didn't handle yet; fixed as part
+  of this verification, see "Three bugs" below), imported with one command
+  and graded with an unrelated stand-in app (`examples/app-todo`, since the
+  point here is proving the import + grading pipeline handles a real task
+  shape, not scoring). Task name/content intentionally omitted here. Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36870510661
+  Result: `{"status":"failed","passed":0,"total":30,"detail":"30/30 tests
+  failed"}` — all 30 real scenarios from the imported spec files actually
+  executed against the stand-in app inside the isolated runner container
+  (mix of assertion failures and timeouts in the per-test error text, as
+  expected for an unrelated app), not a plumbing error.
 - **Quota exceeded** — this one has no Actions run by design: the self-test
   service checks quota *before* dispatching (unchanged, see "Submitter
   identity & quota"), so an over-quota submission never reaches the grader
@@ -402,12 +416,15 @@ signature computed the same way the self-test service would.
   3 submissions`, and `status()` correctly reports `used=3, remaining=0`
   afterwards. Same code path `tests/test_quota.py` already covers.
 
-Three bugs surfaced and were fixed during this verification (all isolated to
+Four bugs surfaced and were fixed during this verification (all isolated to
 the Actions template, not this repo's local `docker compose` channel):
 globally-installed `@playwright/test` wasn't resolvable from the read-only
 mounted test pack (fixed with `NODE_PATH` in `runner/Dockerfile`), per-test
 error messages were being read off the wrong report node (fixed in
-`scripts/parse_report.py`), and the partial-app test fixture didn't actually
+`scripts/parse_report.py`), the partial-app test fixture didn't actually
 get committed the first time (`*.zip` is gitignored on purpose; test
 fixtures need `git add -f`, same as the earlier good/bad ones — caught by
-the resulting "download failed" and fixed by re-adding).
+the resulting "download failed" and fixed by re-adding), and
+`scripts/import_task.py` only looked for a nested `requirements/` directory
+until a real task folder showed up with `requirements.yaml`/`reference/`
+directly at the task root — fixed to detect and support both layouts.
