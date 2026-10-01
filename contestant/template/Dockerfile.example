@@ -1,0 +1,20 @@
+# 示例 Dockerfile（Node 项目）。复制为你项目根目录下的 Dockerfile，按需修改。
+# 要点：
+#   1. 必须放在 zip 的根目录，不能嵌在子文件夹里。
+#   2. 容器里的 app 必须监听环境变量 PORT（评测系统会注入 PORT，不注入时你自己默认 3000）。
+#   3. build 过程不能依赖评测时才有的外网访问，把需要的依赖都在这一步装好。
+
+FROM node:24-bookworm-slim
+WORKDIR /app
+
+# 如果是前后端分离项目，把 frontend/、backend/ 都拷进来，在这一步装依赖、build 前端。
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY . .
+
+# 只是文档作用，实际监听端口由 server 读 process.env.PORT 决定，见下方 CMD 注释。
+EXPOSE 3000
+
+# server 内部要用 `const PORT = Number(process.env.PORT || 3000)` 这种写法监听。
+CMD ["node", "server.js"]
