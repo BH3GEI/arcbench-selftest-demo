@@ -2,8 +2,8 @@
 """selftest: CLI for the arcbench self-test demo. Standard library only.
 
 usage:
-  selftest.py submit ./my-app [--wait]     # zip a directory and submit it
-  selftest.py submit app.zip [--wait]      # or a ready-made zip
+  selftest.py submit ./my-app --task TASK_ID [--wait]  # zip a directory and submit it
+  selftest.py submit app.zip --task TASK_ID [--wait]   # or a ready-made zip
   selftest.py result SUBMISSION_ID
   selftest.py log SUBMISSION_ID [--kind app|runner]
   selftest.py quota
@@ -69,14 +69,22 @@ def zip_dir(src: Path) -> bytes:
         tmp_path.unlink(missing_ok=True)
 
 
-def multipart(field: str, filename: str, data: bytes) -> tuple[bytes, str]:
+def multipart(filename: str, data: bytes, fields: dict[str, str]) -> tuple[bytes, str]:
+    """Build a multipart/form-data body: each `fields` entry as a plain form
+    field, plus `data` as the "file" part."""
     boundary = f"----selftest-{uuid.uuid4().hex}"
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
-        f"Content-Type: application/zip\r\n\r\n"
-    ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
-    return body, f"multipart/form-data; boundary={boundary}"
+    chunks = []
+    for name, value in fields.items():
+        chunks.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+        )
+    chunks.append(
+        (f"--{boundary}\r\n"
+         f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+         f"Content-Type: application/zip\r\n\r\n").encode() + data + b"\r\n"
+    )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
 def print_result(record: dict) -> None:
@@ -115,7 +123,7 @@ def cmd_submit(args) -> int:
     else:
         print(f"error: {src} not found", file=sys.stderr)
         return 1
-    body, content_type = multipart("file", filename, data)
+    body, content_type = multipart(filename, data, {"task_id": args.task})
     try:
         record = request(args, "POST", "/api/submissions", body, content_type)
     except ApiError as exc:
@@ -167,6 +175,7 @@ def main(argv: list[str]) -> int:
 
     p = sub.add_parser("submit", help="submit an app directory or zip")
     p.add_argument("path")
+    p.add_argument("--task", required=True, help="task id, e.g. demo-todo")
     p.add_argument("--wait", action="store_true")
     p.add_argument("--wait-timeout", type=int, default=1800)
     p.set_defaults(fn=cmd_submit)

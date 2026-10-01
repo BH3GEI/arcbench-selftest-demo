@@ -1,24 +1,68 @@
 # One command: docker compose up --build
 # The server builds the Playwright runner image automatically on first use
-# (context mounted at /runner). Override any SELFTEST_* value in a local .env.
+# (context mounted at /runner). Override any SELFTEST_* value in a local .env
+# (copy .env.example to get started).
 services:
   server:
-    build: ./server
+    build:
+      context: .
+      dockerfile: server/Dockerfile
     image: selftest-server:local
     ports:
       - "8080:8080"
     environment:
       SELFTEST_DATA_DIR: /data
       SELFTEST_HOST_DATA_DIR: ${PWD}/data
-      SELFTEST_TEST_PACK_DIR: /pack
-      SELFTEST_HOST_PACK_DIR: ${PWD}/examples/tests
+      SELFTEST_TASKS_DIR: /tasks
+      SELFTEST_HOST_TASKS_DIR: ${PWD}/tasks
       SELFTEST_RUNNER_CONTEXT_DIR: /runner
+      SELFTEST_AUTH_MODE: ${SELFTEST_AUTH_MODE:-token}
       SELFTEST_TEAM_TOKENS: ${SELFTEST_TEAM_TOKENS:-demo=demo-token}
+      SELFTEST_TEAM_SECRETS: ${SELFTEST_TEAM_SECRETS:-}
       SELFTEST_DAILY_LIMIT: ${SELFTEST_DAILY_LIMIT:-10}
+      SELFTEST_JOB_WORKERS: ${SELFTEST_JOB_WORKERS:-1}
+      SELFTEST_JOB_QUEUE_MAX: ${SELFTEST_JOB_QUEUE_MAX:-100}
+      SELFTEST_RETENTION_HOURS: ${SELFTEST_RETENTION_HOURS:-720}
+      SELFTEST_LOG_FORMAT: ${SELFTEST_LOG_FORMAT:-text}
+      SELFTEST_LOG_LEVEL: ${SELFTEST_LOG_LEVEL:-INFO}
     volumes:
       # The server orchestrates sibling containers through the host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data
-      - ./examples/tests:/pack:ro
+      - ./tasks:/tasks:ro
       - ./runner:/runner:ro
+    # Generous relative to a single build+test run; this is the process that
+    # drives `docker build`/`docker run` for submissions, not the submission
+    # itself (that's bounded separately by SELFTEST_APP_MEM/APP_CPUS).
+    mem_limit: 1g
+    cpus: 2.0
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # HTTPS termination example — disabled by default. Enable with:
+  #   docker compose --profile proxy up --build
+  # after pointing deploy/Caddyfile at a real domain (Caddy gets certs from
+  # Let's Encrypt automatically) or swapping in deploy/nginx.conf.example +
+  # your own certs. Either way the server itself stays on plain HTTP behind it.
+  proxy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

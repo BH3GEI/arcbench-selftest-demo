@@ -1,11 +1,32 @@
-"""Team tokens and per-submission visibility.
+"""Pluggable authentication, plus per-submission visibility.
 
-Demo-grade auth: a bearer-style token identifies the team. Platform
-integration should replace `team_for_token` with their SSO/session mapping;
-the visibility rule (results readable only by the submitting team) stays.
+`Authenticator.authenticate(token) -> team` is the integration seam: swap in
+your platform's SSO/session verifier by implementing it and returning it from
+`build_authenticator()` for `SELFTEST_AUTH_MODE=sso` below. Two built-in
+implementations ship for everything short of that:
+
+- `token` (default): a bearer-style token identifies the team directly, via
+  the `SELFTEST_TEAM_TOKENS` map. With no map configured, requests are
+  rejected unless `SELFTEST_ALLOW_ANY_TOKEN=1`, in which case the token
+  string itself is the team id — convenient for local dev, not for anything
+  with real stakes.
+- `hmac`: a signed, expiring token (`team.timestamp.signature`) keyed per
+  team by `SELFTEST_TEAM_SECRETS`, for a bit more assurance than a static
+  bearer token without standing up a full SSO integration. It is NOT
+  replay-proof (no nonce store) — only a bounded validity window — so treat
+  it as "slightly harder to shoulder-surf and replay forever", not a
+  cryptographic session protocol.
+
+The visibility rule (a submission's result is readable only by the team that
+submitted it) is unrelated to which Authenticator is in use and stays as-is.
 """
 
 from __future__ import annotations
+
+import hashlib
+import hmac
+import time
+from typing import Protocol
 
 from .config import Config
 
@@ -18,18 +39,88 @@ class VisibilityError(Exception):
     pass
 
 
-def team_for_token(cfg: Config, token: str | None) -> str:
-    if not token:
-        raise AuthError("missing team token (X-Team-Token header)")
-    if cfg.team_tokens:
-        team = cfg.team_tokens.get(token)
-        if team is None:
-            raise AuthError("unknown team token")
+class Authenticator(Protocol):
+    def authenticate(self, token: str | None) -> str:
+        """Return the team id for a request's token. Raises AuthError."""
+        ...
+
+
+class StaticTokenAuth:
+    """Default: `SELFTEST_TEAM_TOKENS` map. With no map configured, requests
+    are rejected unless `allow_any_token` is explicitly set — a server
+    deployed without tokens configured should refuse requests, not silently
+    trust any caller; `SELFTEST_ALLOW_ANY_TOKEN=1` opts into that passthrough
+    for local dev."""
+
+    def __init__(self, team_tokens: dict[str, str], allow_any_token: bool = False):
+        self.team_tokens = team_tokens
+        self.allow_any_token = allow_any_token
+
+    def authenticate(self, token: str | None) -> str:
+        if not token:
+            raise AuthError("missing team token (X-Team-Token header)")
+        if self.team_tokens:
+            team = self.team_tokens.get(token)
+            if team is None:
+                raise AuthError("unknown team token")
+            return team
+        if not self.allow_any_token:
+            raise AuthError("no team tokens configured on the server")
+        # Dev mode (SELFTEST_ALLOW_ANY_TOKEN=1): the token string itself is the team id.
+        return token
+
+
+class HmacTokenAuth:
+    """`X-Team-Token: <team>.<unix-timestamp>.<hex hmac-sha256>`, signed with
+    that team's secret over `f"{team}.{timestamp}"`. Rejects a timestamp
+    outside `max_skew_s` of the server clock either direction."""
+
+    def __init__(self, team_secrets: dict[str, str], max_skew_s: int = 300):
+        if not team_secrets:
+            raise AuthError("SELFTEST_AUTH_MODE=hmac requires SELFTEST_TEAM_SECRETS")
+        self.team_secrets = team_secrets
+        self.max_skew_s = max_skew_s
+
+    def authenticate(self, token: str | None) -> str:
+        if not token:
+            raise AuthError("missing team token (X-Team-Token header)")
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise AuthError("malformed token: expected team.timestamp.signature")
+        team, raw_ts, signature = parts
+        secret = self.team_secrets.get(team)
+        if secret is None:
+            raise AuthError("unknown team")
+        try:
+            timestamp = int(raw_ts)
+        except ValueError:
+            raise AuthError("malformed token: timestamp must be an integer") from None
+        if abs(time.time() - timestamp) > self.max_skew_s:
+            raise AuthError("token expired or timestamp out of range")
+        expected = hmac.new(secret.encode(), f"{team}.{raw_ts}".encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise AuthError("invalid signature")
         return team
-    if not cfg.allow_any_token:
-        raise AuthError("no team tokens configured on the server")
-    # Dev mode (SELFTEST_ALLOW_ANY_TOKEN=1): the token string itself is the team id.
-    return token
+
+
+def build_authenticator(cfg: Config) -> Authenticator:
+    mode = cfg.auth_mode
+    if mode == "token":
+        return StaticTokenAuth(cfg.team_tokens, cfg.allow_any_token)
+    if mode == "hmac":
+        return HmacTokenAuth(cfg.team_secrets)
+    if mode == "sso":
+        raise SystemExit(
+            "config: SELFTEST_AUTH_MODE=sso has no built-in implementation — "
+            "implement Authenticator (see server/app/auth.py) against your "
+            "platform's SSO/session verifier and return it here"
+        )
+    raise SystemExit(f"config: unknown SELFTEST_AUTH_MODE {mode!r} (expected token, hmac, or sso)")
+
+
+def team_for_token(cfg: Config, token: str | None) -> str:
+    """Back-compat shim for callers that haven't moved to build_authenticator()."""
+    return StaticTokenAuth(cfg.team_tokens, cfg.allow_any_token).authenticate(token)
 
 
 def assert_can_view(team: str, owner_team: str) -> None:

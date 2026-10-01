@@ -1,9 +1,15 @@
-"""Submission zip validation and safe extraction."""
+"""Submission zip validation and safe extraction — thin wrapper around the
+shared `common.zipsafety` core (actions/template/common/zipsafety.py, also
+used by the GitHub Actions grader's scripts/safe_unzip.py) so a zip is
+accepted or rejected for the same reasons on either channel."""
 
 from __future__ import annotations
 
-import zipfile
 from pathlib import Path
+
+from common.zipsafety import ZipSafetyError
+from common.zipsafety import extract as _extract
+from common.zipsafety import validate as _validate
 
 
 class ValidationError(Exception):
@@ -11,29 +17,16 @@ class ValidationError(Exception):
 
 
 def validate_zip(zip_path: Path, max_mb: int, max_files: int, max_unzipped_mb: int = 200) -> None:
-    if not zipfile.is_zipfile(zip_path):
-        raise ValidationError("not a zip file")
-    if zip_path.stat().st_size > max_mb * 1024 * 1024:
-        raise ValidationError(f"zip exceeds {max_mb} MB")
-    with zipfile.ZipFile(zip_path) as zf:
-        names = [i.filename for i in zf.infolist() if not i.is_dir()]
-        if len(names) > max_files:
-            raise ValidationError(f"zip has more than {max_files} files")
-        if sum(i.file_size for i in zf.infolist()) > max_unzipped_mb * 1024 * 1024:
-            raise ValidationError(f"zip expands to more than {max_unzipped_mb} MB")
-        if "Dockerfile" not in names:
-            raise ValidationError("zip must contain a Dockerfile at its root")
-        for name in names:
-            p = Path(name)
-            if p.is_absolute() or ".." in p.parts:
-                raise ValidationError(f"unsafe path in zip: {name!r}")
+    try:
+        _validate(zip_path, max_files=max_files,
+                 max_zip_bytes=max_mb * 1024 * 1024,
+                 max_total_bytes=max_unzipped_mb * 1024 * 1024)
+    except ZipSafetyError as exc:
+        raise ValidationError(str(exc)) from exc
 
 
 def extract(zip_path: Path, dest: Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
-            target = dest / info.filename
-            if not target.resolve().is_relative_to(dest.resolve()):
-                raise ValidationError(f"unsafe path in zip: {info.filename!r}")
-        zf.extractall(dest)
+    try:
+        _extract(zip_path, dest)
+    except ZipSafetyError as exc:
+        raise ValidationError(str(exc)) from exc

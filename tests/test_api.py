@@ -26,8 +26,10 @@ class FakeEvaluator:
         self.result = result or EvalResult(status="done", passed=1, failed=0, total=1, pass_rate=100.0)
         self.calls: list[str] = []
 
-    def evaluate(self, job_id: str, app_src: Path, results_dir: Path) -> EvalResult:
+    def evaluate(self, job_id: str, app_src: Path, results_dir: Path, task) -> EvalResult:
         self.calls.append(job_id)
+        self.result.task_id = task.task_id
+        self.result.visibility = task.visibility
         return self.result
 
 
@@ -42,14 +44,22 @@ def make_zip(files: dict[str, str]) -> bytes:
 VALID_ZIP = make_zip({"Dockerfile": "FROM scratch", "server.js": "ok"})
 
 
+def make_task(tasks_dir: Path, task_id: str = "t1") -> None:
+    req_dir = tasks_dir / task_id / "requirements"
+    req_dir.mkdir(parents=True)
+    (req_dir / "requirements.yaml").write_text("visibility: public\n")
+    (tasks_dir / task_id / "tests").mkdir()
+
+
 def build_client(tmp_path, *, daily_limit=10, evaluator=None, max_zip_mb=1, max_zip_files=50):
     cfg = Config(
         data_dir=tmp_path / "data",
-        pack_dir=tmp_path / "pack",
+        tasks_dir=tmp_path / "tasks",
         daily_limit=daily_limit,
         max_zip_mb=max_zip_mb,
         max_zip_files=max_zip_files,
     ).resolve()
+    make_task(cfg.tasks_dir)
     store = Store(cfg.data_dir)
     quota = Quota(cfg.data_dir / "quota.db", cfg.daily_limit)
     fake = evaluator or FakeEvaluator()
@@ -58,10 +68,11 @@ def build_client(tmp_path, *, daily_limit=10, evaluator=None, max_zip_mb=1, max_
     return TestClient(app), fake, service
 
 
-def submit(client, data: bytes, filename="app.zip", token="team-a"):
+def submit(client, data: bytes, filename="app.zip", token="team-a", task_id="t1"):
     return client.post(
         "/api/submissions",
         files={"file": (filename, data, "application/zip")},
+        data={"task_id": task_id},
         headers={"X-Team-Token": token},
     )
 

@@ -23,15 +23,17 @@ def test_zip_dir_includes_dockerfile(tmp_path):
 
 
 def test_multipart_contains_field_and_data():
-    body, content_type = cli.multipart("file", "app.zip", b"zipbytes")
+    body, content_type = cli.multipart("app.zip", b"zipbytes", {"task_id": "demo-todo"})
     assert content_type.startswith("multipart/form-data; boundary=")
     assert b'name="file"' in body
     assert b"app.zip" in body
     assert b"zipbytes" in body
+    assert b'name="task_id"' in body
+    assert b"demo-todo" in body
 
 
 def test_submit_missing_path_fails(capsys):
-    code = cli.main(["submit", "/no/such/path"])
+    code = cli.main(["submit", "/no/such/path", "--task", "demo-todo"])
     assert code == 1
     assert "not found" in capsys.readouterr().err
 
@@ -40,7 +42,7 @@ def test_submit_directory_without_dockerfile_fails(tmp_path, capsys):
     src = tmp_path / "app"
     src.mkdir()
     (src / "server.js").write_text("ok")
-    code = cli.main(["submit", str(src)])
+    code = cli.main(["submit", str(src), "--task", "demo-todo"])
     assert code == 1
     assert "Dockerfile" in capsys.readouterr().err
 
@@ -57,7 +59,7 @@ def test_submit_zip_posts_and_prints_id(tmp_path, monkeypatch, capsys):
         return {"id": "abc123", "status": "queued"}
 
     monkeypatch.setattr(cli, "request", fake_request)
-    code = cli.main(["submit", str(src)])
+    code = cli.main(["submit", str(src), "--task", "demo-todo"])
     assert code == 0
     assert calls == [("POST", "/api/submissions")]
     assert "abc123" in capsys.readouterr().out
@@ -81,7 +83,7 @@ def test_submit_with_wait_polls_until_done(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "request", fake_request)
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
-    code = cli.main(["submit", str(src), "--wait"])
+    code = cli.main(["submit", str(src), "--task", "demo-todo", "--wait"])
     assert code == 0
     out = capsys.readouterr().out
     assert "status=done" in out
@@ -98,7 +100,7 @@ def test_submit_with_wait_times_out(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "request", fake_request)
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
-    code = cli.main(["submit", str(src), "--wait", "--wait-timeout", "0"])
+    code = cli.main(["submit", str(src), "--task", "demo-todo", "--wait", "--wait-timeout", "0"])
     assert code == 2
     assert "deadline expired" in capsys.readouterr().err
 

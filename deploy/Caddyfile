@@ -1,0 +1,31 @@
+# HTTPS reverse proxy example for the self-test server, via Caddy (automatic
+# Let's Encrypt certs, zero manual renewal). Used by compose.yml's "proxy"
+# service: `docker compose --profile proxy up --build`.
+#
+# Replace the placeholder domain, then make sure DNS for it points at this
+# host and ports 80/443 are reachable from the internet (Caddy needs 80 for
+# the ACME HTTP-01 challenge, or configure DNS-01 for a private deployment).
+
+selftest.example.com {
+	# File upload bodies can be large (submitted app zips, up to
+	# SELFTEST_MAX_ZIP_MB) — match or exceed that on the proxy side too.
+	request_body {
+		max_size 100MB
+	}
+
+	reverse_proxy server:8080 {
+		# Builds can run long; don't let the proxy time out a submission
+		# the server is still legitimately working on.
+		transport http {
+			read_timeout 15m
+			write_timeout 15m
+		}
+	}
+
+	encode gzip
+
+	log {
+		output stdout
+		format json
+	}
+}

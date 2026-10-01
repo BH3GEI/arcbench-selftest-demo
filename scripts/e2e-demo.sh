@@ -22,19 +22,19 @@ echo "== quota before =="
 $CLI quota
 
 echo "== 1. example app: expect all tests passed (exit 0) =="
-$CLI submit examples/app-todo --wait
+$CLI submit examples/app-todo --task demo-todo --wait
 check "example app passes" 0 $?
 
 echo "== 2. broken app: expect failing tests (exit 1) =="
-$CLI submit examples/app-todo-broken --wait
+$CLI submit examples/app-todo-broken --task demo-todo --wait
 check "broken app fails" 1 $?
 
 echo "== 3. partial app: expect 60% (exit 1) =="
-$CLI submit examples/app-todo-partial --wait
+$CLI submit examples/app-todo-partial --task demo-todo --wait
 check "partial app scores 60%" 1 $?
 
 echo "== 4. over-quota submission: expect rejection =="
-out=$($CLI submit examples/app-todo 2>&1)
+out=$($CLI submit examples/app-todo --task demo-todo 2>&1)
 rc=$?
 echo "$out"
 if [ $rc -ne 0 ] && echo "$out" | grep -q "429"; then

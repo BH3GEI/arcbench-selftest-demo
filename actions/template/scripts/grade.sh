@@ -31,9 +31,6 @@ retry() {
 : "${DOWNLOAD_URL:?missing DOWNLOAD_URL}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TASK_DIR="$ROOT/tasks/$TASK_ID"
-REQ_FILE="$TASK_DIR/requirements/requirements.yaml"
-TESTS_DIR="$TASK_DIR/tests"
 # Fixed, predictable location (not mktemp) so a workflow step can upload
 # $WORK/results as a build artifact for debugging without knowing a random
 # path. Gitignored; removed at the end of a normal cleanup trap is not
@@ -64,14 +61,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-req() {
-  # req <key> <default> — flat "key: value" lookup, see requirements.yaml header.
-  local line
-  line="$(grep -E "^$1:" "$REQ_FILE" 2>/dev/null | head -1 | cut -d: -f2-)"
-  line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  if [ -z "$line" ]; then echo "$2"; else echo "$line"; fi
-}
-
 # 0. authenticate the dispatch itself. This is also where per-team daily
 # quota lands on the Actions side (see README_ACTIONS.md "Quota"): the
 # self-test service signs {submission_id, task_id, timestamp} only *after*
@@ -94,17 +83,20 @@ if [ -z "$DETAIL" ] && ! [[ "$TASK_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   STATUS="error"; DETAIL="invalid task_id"
 fi
 
-if [ -z "$DETAIL" ] && [ ! -f "$REQ_FILE" ]; then
-  STATUS="error"; DETAIL="unknown task_id: $TASK_ID"
+# Task lookup (visibility, app_port, timeouts, tests dir) goes through
+# common/taskspec.py — the exact module the local docker-compose server
+# imports for the same purpose — so a task_id resolves identically on both
+# grading channels.
+if [ -z "$DETAIL" ]; then
+  if ! TASK_ENV="$(PYTHONPATH="$ROOT" python3 -m common.taskspec "$ROOT/tasks" "$TASK_ID")"; then
+    STATUS="error"; DETAIL="unknown task_id: $TASK_ID"
+  else
+    eval "$TASK_ENV"
+  fi
 fi
 
 if [ -z "$DETAIL" ]; then
-  VISIBILITY="$(req visibility public)"
   if [ -n "${VISIBILITY_OVERRIDE:-}" ]; then VISIBILITY="$VISIBILITY_OVERRIDE"; fi
-  APP_PORT="$(req app_port 3000)"
-  BUILD_TIMEOUT_S="$(req build_timeout_s 600)"
-  READY_TIMEOUT_S="$(req ready_timeout_s 60)"
-  RUN_TIMEOUT_S="$(req run_timeout_s 900)"
 
   echo "[grade] submission=$SUBMISSION_ID task=$TASK_ID visibility=$VISIBILITY"
 

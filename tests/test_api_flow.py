@@ -17,9 +17,11 @@ from app.store import Store
 class FakeEvaluator:
     """Evaluates instantly, no Docker. Used by API tests."""
 
-    def evaluate(self, job_id: str, app_src: Path, results_dir: Path) -> EvalResult:
+    def evaluate(self, job_id: str, app_src: Path, results_dir: Path, task) -> EvalResult:
         return EvalResult(
             status="done",
+            task_id=task.task_id,
+            visibility=task.visibility,
             passed=2,
             failed=0,
             total=2,
@@ -39,11 +41,20 @@ def make_zip_bytes(files: dict[str, str]) -> bytes:
     return buf.getvalue()
 
 
+def make_task(tasks_dir: Path, task_id: str, visibility: str = "public") -> None:
+    req_dir = tasks_dir / task_id / "requirements"
+    req_dir.mkdir(parents=True)
+    (req_dir / "requirements.yaml").write_text(f"visibility: {visibility}\n")
+    tests_dir = tasks_dir / task_id / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "x.spec.js").write_text("test('x')")
+
+
 @pytest.fixture()
 def client(tmp_path):
-    cfg = Config(data_dir=tmp_path / "data", pack_dir=tmp_path / "pack", daily_limit=2)
-    cfg.pack_dir.mkdir()
-    (cfg.pack_dir / "x.spec.js").write_text("test('x')")
+    cfg = Config(data_dir=tmp_path / "data", tasks_dir=tmp_path / "tasks", daily_limit=2)
+    make_task(cfg.tasks_dir, "t1")
+    make_task(cfg.tasks_dir, "t1-hidden", visibility="hidden")
     store = Store(cfg.data_dir)
     quota = Quota(cfg.data_dir / "quota.db", cfg.daily_limit)
     service = JobService(cfg, store, quota, FakeEvaluator())
@@ -63,10 +74,11 @@ def wait_done(store, sub_id, timeout=5.0):
     raise AssertionError("job did not finish")
 
 
-def submit(client, token="team-a"):
+def submit(client, token="team-a", task_id="t1"):
     return client.post(
         "/api/submissions",
         files={"file": ("app.zip", make_zip_bytes({"Dockerfile": "FROM scratch"}), "application/zip")},
+        data={"task_id": task_id},
         headers={"X-Team-Token": token},
     )
 
@@ -82,6 +94,34 @@ def test_full_flow(client):
     assert body["result"]["pass_rate"] == 100.0
     assert body["result"]["pack_hash"] == "ab" * 32
     assert [t["title"] for t in body["result"]["tests"]] == ["t1", "t2"]
+
+
+def test_hidden_task_result_reduced_to_status_passed_total(client):
+    sub_id = submit(client, task_id="t1-hidden").json()["id"]
+    wait_done(client.store, sub_id)
+    body = client.get(f"/api/submissions/{sub_id}", headers={"X-Team-Token": "team-a"}).json()
+    assert body["result"] == {"status": "done", "passed": 2, "total": 2}
+
+
+def test_hidden_task_logs_and_artifacts_forbidden(client):
+    sub_id = submit(client, task_id="t1-hidden").json()["id"]
+    wait_done(client.store, sub_id)
+    (client.store.result_dir(sub_id) / "app.log").write_text("secret log")
+    r = client.get(f"/api/submissions/{sub_id}/logs/app", headers={"X-Team-Token": "team-a"})
+    assert r.status_code == 403
+    r = client.get(f"/api/submissions/{sub_id}/artifact?path=app.log", headers={"X-Team-Token": "team-a"})
+    assert r.status_code == 403
+
+
+def test_unknown_task_id_rejected(client):
+    r = client.post(
+        "/api/submissions",
+        files={"file": ("app.zip", make_zip_bytes({"Dockerfile": "FROM scratch"}), "application/zip")},
+        data={"task_id": "no-such-task"},
+        headers={"X-Team-Token": "team-a"},
+    )
+    assert r.status_code == 400
+    assert "no-such-task" in r.json()["detail"]
 
 
 def test_results_visible_only_to_owner(client):
@@ -106,6 +146,7 @@ def test_invalid_zip_rejected_without_consuming_quota(client):
     r = client.post(
         "/api/submissions",
         files={"file": ("app.zip", b"junk", "application/zip")},
+        data={"task_id": "t1"},
         headers={"X-Team-Token": "team-a"},
     )
     assert r.status_code == 400
@@ -116,6 +157,7 @@ def test_missing_dockerfile_rejected(client):
     r = client.post(
         "/api/submissions",
         files={"file": ("app.zip", make_zip_bytes({"x.txt": "y"}), "application/zip")},
+        data={"task_id": "t1"},
         headers={"X-Team-Token": "team-a"},
     )
     assert r.status_code == 400

@@ -1,0 +1,38 @@
+# HTTPS reverse proxy example for the self-test server, via nginx — use this
+# instead of deploy/Caddyfile if you already manage your own certs (e.g.
+# via certbot) rather than wanting Caddy's automatic ACME. Not wired into
+# compose.yml (bring your own nginx container/host install and certs);
+# adjust paths, domain and upstream address for your deployment.
+
+upstream selftest_server {
+    server 127.0.0.1:8080;
+}
+
+server {
+    listen 80;
+    server_name selftest.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name selftest.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/selftest.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/selftest.example.com/privkey.pem;
+
+    # Submitted app zips can be large (SELFTEST_MAX_ZIP_MB, default 50MB) —
+    # match or exceed that here, and builds can run long, so give requests
+    # generous timeouts rather than cutting off a submission mid-grade.
+    client_max_body_size 100M;
+    proxy_read_timeout 15m;
+    proxy_send_timeout 15m;
+
+    location / {
+        proxy_pass http://selftest_server;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

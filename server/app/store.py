@@ -4,6 +4,8 @@ SQLite; enough for a demo and easy to swap for the platform's database."""
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 import sqlite3
 import threading
 import time
@@ -11,6 +13,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .runner import EvalResult
+
+log = logging.getLogger("selftest.store")
 
 
 class Store:
@@ -24,17 +28,18 @@ class Store:
         self._db = sqlite3.connect(data_dir / "selftest.db", check_same_thread=False)
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS submissions ("
-            "id TEXT PRIMARY KEY, team TEXT NOT NULL, status TEXT NOT NULL, "
+            "id TEXT PRIMARY KEY, team TEXT NOT NULL, task_id TEXT NOT NULL, status TEXT NOT NULL, "
             "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
         )
         self._db.commit()
 
-    def create(self, sub_id: str, team: str) -> None:
+    def create(self, sub_id: str, team: str, task_id: str) -> None:
         now = time.time()
         with self._lock:
             self._db.execute(
-                "INSERT INTO submissions (id, team, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
-                (sub_id, team, now, now),
+                "INSERT INTO submissions (id, team, task_id, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'queued', ?, ?)",
+                (sub_id, team, task_id, now, now),
             )
             self._db.commit()
 
@@ -48,21 +53,22 @@ class Store:
 
     def get(self, sub_id: str) -> dict | None:
         row = self._db.execute(
-            "SELECT id, team, status, created_at, updated_at FROM submissions WHERE id = ?",
+            "SELECT id, team, task_id, status, created_at, updated_at FROM submissions WHERE id = ?",
             (sub_id,),
         ).fetchone()
         if not row:
             return None
-        return {"id": row[0], "team": row[1], "status": row[2], "created_at": row[3], "updated_at": row[4]}
+        return {"id": row[0], "team": row[1], "task_id": row[2], "status": row[3],
+                "created_at": row[4], "updated_at": row[5]}
 
     def list_for_team(self, team: str, limit: int = 20) -> list[dict]:
         rows = self._db.execute(
-            "SELECT id, team, status, created_at, updated_at FROM submissions "
+            "SELECT id, team, task_id, status, created_at, updated_at FROM submissions "
             "WHERE team = ? ORDER BY created_at DESC LIMIT ?",
             (team, limit),
         ).fetchall()
         return [
-            {"id": r[0], "team": r[1], "status": r[2], "created_at": r[3], "updated_at": r[4]}
+            {"id": r[0], "team": r[1], "task_id": r[2], "status": r[3], "created_at": r[4], "updated_at": r[5]}
             for r in rows
         ]
 
@@ -87,3 +93,30 @@ class Store:
             return json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return None
+
+    # ------------------------------------------------------------------ retention
+    def sweep_expired(self, retention_hours: int) -> int:
+        """Delete finished submissions (zip, extracted source, results, logs)
+        older than `retention_hours`, plus their DB rows. 0 disables this —
+        callers should not invoke it at all in that case. Returns the count
+        removed. Submissions still queued/building/running are never swept
+        regardless of age."""
+        if retention_hours <= 0:
+            return 0
+        cutoff = time.time() - retention_hours * 3600
+        rows = self._db.execute(
+            "SELECT id FROM submissions WHERE created_at < ? "
+            "AND status NOT IN ('queued', 'building', 'running')",
+            (cutoff,),
+        ).fetchall()
+        removed = 0
+        for (sub_id,) in rows:
+            shutil.rmtree(self.submission_dir(sub_id), ignore_errors=True)
+            shutil.rmtree(self.result_dir(sub_id), ignore_errors=True)
+            with self._lock:
+                self._db.execute("DELETE FROM submissions WHERE id = ?", (sub_id,))
+                self._db.commit()
+            removed += 1
+        if removed:
+            log.info("retention sweep removed %d submission(s) older than %dh", removed, retention_hours)
+        return removed

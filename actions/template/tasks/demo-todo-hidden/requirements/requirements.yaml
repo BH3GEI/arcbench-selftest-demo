@@ -1,0 +1,12 @@
+# Flat key: value pairs on purpose — scripts/grade.sh and common/taskspec.py
+# parse this file without a YAML library (no extra installs needed).
+# Same task as demo-todo, but visibility: hidden — for exercising and
+# verifying the hidden-visibility result masking on both grading channels
+# without needing workflow_dispatch's visibility_override.
+task_id: demo-todo-hidden
+title: Todo app (hidden)
+visibility: hidden
+app_port: 3000
+build_timeout_s: 600
+ready_timeout_s: 60
+run_timeout_s: 900

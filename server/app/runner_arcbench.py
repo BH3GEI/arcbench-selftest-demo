@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 from types import ModuleType
 
+from common.taskspec import TaskSpec
+
 from .config import Config
 from .packhash import pack_hash
 from .runner import EvalResult, TestCaseResult
@@ -106,17 +108,19 @@ class ArcbenchRunnerEvaluator:
             os.environ.get("SELFTEST_ARCBENCH_RUNNER_PATH", "/opt/arcbench/run_submission.py")
         )
 
-    def evaluate(self, job_id: str, app_src: Path, results_dir: Path) -> EvalResult:
+    def evaluate(self, job_id: str, app_src: Path, results_dir: Path, task: TaskSpec) -> EvalResult:
         started = time.monotonic()
         results_dir.mkdir(parents=True, exist_ok=True)
         try:
             runner = load_arcbench_runner(self.runner_path)
         except RunnerLoadError as exc:
-            return EvalResult(status="error", detail=str(exc))
+            return EvalResult(status="error", task_id=task.task_id, visibility=task.visibility, detail=str(exc))
 
         payload = self._drive(runner, app_src, results_dir)
         duration = time.monotonic() - started
-        result = eval_result_from_runner(payload, pack_hash(self.cfg.pack_dir), duration)
+        result = eval_result_from_runner(payload, pack_hash(task.tests_dir), duration)
+        result.task_id = task.task_id
+        result.visibility = task.visibility
         for name in ("app.log", "runner.log"):
             path = results_dir / name
             if path.is_file():

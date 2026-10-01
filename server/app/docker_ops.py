@@ -82,17 +82,18 @@ class DockerOps:
         return net.id
 
     # ------------------------------------------------------------------ containers
-    def run_app(self, image: str, name: str, network: str, job_id: str):
+    def run_app(self, image: str, name: str, network: str, job_id: str, app_port: int):
         cfg = self.cfg
-        return self.client.containers.run(
+        # containers.run()'s `network=` + `networking_config=` combo silently
+        # drops the alias on this docker-py version (the container connects
+        # with Aliases: None) — create unattached, then explicitly connect to
+        # the job's network with the "app" alias the Playwright runner
+        # resolves, matching the GitHub Actions grader's
+        # `docker run --network-alias app`.
+        container = self.client.containers.create(
             image,
-            detach=True,
             name=name,
-            network=network,
-            # docker-py has no network_aliases kwarg; aliases go through
-            # the endpoint config of the network being joined.
-            networking_config={network: self.client.api.create_endpoint_config(aliases=["app"])},
-            environment={"PORT": str(cfg.app_port)},
+            environment={"PORT": str(app_port)},
             mem_limit=cfg.app_mem,
             memswap_limit=cfg.app_mem,
             nano_cpus=int(cfg.app_cpus * 1e9),
@@ -104,9 +105,18 @@ class DockerOps:
             log_config=CAPPED_LOGS,
             labels={cfg.label: job_id},
         )
+        self.client.networks.get(network).connect(container, aliases=["app"])
+        try:
+            self.client.networks.get("bridge").disconnect(container, force=True)
+        except Exception:
+            pass  # no default bridge attachment to remove
+        container.start()
+        container.reload()
+        return container
 
     def run_runner(self, name: str, network: str, job_id: str, base_url: str,
-                   host_pack_dir: Path, host_results_dir: Path) -> tuple[int, str]:
+                   host_pack_dir: Path, host_results_dir: Path,
+                   ready_timeout_s: int, run_timeout_s: int) -> tuple[int, str]:
         """Run the Playwright runner to completion. Returns (exit_code, logs)."""
         cfg = self.cfg
         container = self.client.containers.run(
@@ -116,7 +126,7 @@ class DockerOps:
             network=network,
             environment={
                 "BASE_URL": base_url,
-                "READY_TIMEOUT": str(cfg.ready_timeout_s),
+                "READY_TIMEOUT": str(ready_timeout_s),
             },
             volumes={
                 str(host_pack_dir): {"bind": "/pack", "mode": "ro"},
@@ -129,18 +139,18 @@ class DockerOps:
             log_config=CAPPED_LOGS,
             labels={cfg.label: job_id},
         )
-        deadline = time.monotonic() + cfg.run_timeout_s
+        deadline = time.monotonic() + run_timeout_s
         while True:
             container.reload()
             if container.status != "running":
                 break
             if time.monotonic() > deadline:
-                log.warning("runner %s exceeded %ss, killing", name, cfg.run_timeout_s)
+                log.warning("runner %s exceeded %ss, killing", name, run_timeout_s)
                 try:
                     container.kill()
                 except Exception:
                     pass
-                return 124, f"runner exceeded {cfg.run_timeout_s}s and was killed"
+                return 124, f"runner exceeded {run_timeout_s}s and was killed"
             time.sleep(1)
         logs = container.logs(tail=5000).decode("utf-8", errors="replace")
         exit_code = int(container.attrs["State"].get("ExitCode", 1))

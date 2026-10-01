@@ -1,51 +1,25 @@
 #!/usr/bin/env python3
-"""Extract a submitted app zip with basic safety limits: no path traversal,
-no symlinks, bounded file count and total size. Mirrors the checks the local
-demo's server/app/validate.py applies before a submission is ever built."""
+"""Thin CLI wrapper around the shared `common.zipsafety` core (the same
+module `server/app/validate.py` uses) so a submitted app zip is accepted or
+rejected identically on both grading channels. The Dockerfile-at-root check
+is left to scripts/grade.sh, which runs it as a separate, explicit step.
+"""
 from __future__ import annotations
 
-import os
 import sys
-import zipfile
+from pathlib import Path
 
-MAX_FILES = 2000
-MAX_TOTAL_BYTES = 50 * 1024 * 1024
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from common.zipsafety import ZipSafetyError, check_and_extract
 
 
 def main(zip_path: str, dest: str) -> int:
     try:
-        zf = zipfile.ZipFile(zip_path)
-    except zipfile.BadZipFile:
-        print("not a valid zip file", file=sys.stderr)
+        check_and_extract(Path(zip_path), Path(dest), require_dockerfile=False)
+    except ZipSafetyError as exc:
+        print(exc, file=sys.stderr)
         return 1
-
-    infos = zf.infolist()
-    if len(infos) > MAX_FILES:
-        print(f"too many files in zip: {len(infos)} > {MAX_FILES}", file=sys.stderr)
-        return 1
-
-    total = 0
-    dest_root = os.path.realpath(dest)
-    for info in infos:
-        name = info.filename
-        if name.startswith("/") or ".." in name.split("/"):
-            print(f"unsafe path in zip: {name}", file=sys.stderr)
-            return 1
-        # Reject symlinks (upper 16 bits of external_attr hold unix mode).
-        mode = (info.external_attr >> 16) & 0xFFFF
-        if mode and (mode & 0o170000) == 0o120000:
-            print(f"symlink not allowed: {name}", file=sys.stderr)
-            return 1
-        total += info.file_size
-        if total > MAX_TOTAL_BYTES:
-            print(f"zip too large: > {MAX_TOTAL_BYTES} bytes", file=sys.stderr)
-            return 1
-        target = os.path.realpath(os.path.join(dest_root, name))
-        if target != dest_root and not target.startswith(dest_root + os.sep):
-            print(f"path escapes destination: {name}", file=sys.stderr)
-            return 1
-
-    zf.extractall(dest_root)
     return 0
 
 
