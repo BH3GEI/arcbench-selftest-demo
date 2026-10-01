@@ -168,14 +168,15 @@
 
   /* --------------------------------------------------------------- shell */
 
-  var session = null; // {githubId, login, avatarUrl} | null
+  var session = null; // {githubId, login} | null
   var pollTimer = null;
 
   function currentPath() { return location.hash.replace(/^#/, '') || '/'; }
   function go(path) { location.hash = path; }
-  function loginHref(next) {
-    return '/api/auth/github/login?next=' + encodeURIComponent('#' + (next || currentPath()));
-  }
+  // server/app/oauth_github.py always redirects back to "/" after login (no
+  // ?next= support) — different from actions/web's NextAuth callbackUrl,
+  // which does return the user to where they started. See docs/parity.md §7.
+  var LOGIN_HREF = '/auth/github/login';
 
   var NAV = [
     { href: '#/', label: '概览', match: function (p) { return p === '/'; } },
@@ -201,13 +202,12 @@
       (light ? '暗色' : '亮色') + '</button>';
     if (session) {
       html += '<span class="user"><span class="uname">' + esc(session.login) + '</span>' +
-        '<button type="button" class="btn btn-sm" id="logout-btn">退出</button></span>';
+        '<a href="/auth/logout" class="btn btn-sm">退出</a></span>';
     }
     html += '</div>';
     var el = document.getElementById('site-header');
     el.innerHTML = html;
     document.getElementById('theme-toggle').onclick = toggleTheme;
-    if (session) document.getElementById('logout-btn').onclick = logout;
   }
 
   function toggleTheme() {
@@ -216,14 +216,6 @@
     else delete document.documentElement.dataset.theme;
     try { localStorage.setItem('theme', next ? 'light' : 'dark'); } catch (e) {}
     renderHeader();
-  }
-
-  function logout() {
-    api('/api/auth/logout', { method: 'POST' }).catch(function () {}).then(function () {
-      session = null;
-      renderHeader();
-      go('/');
-    });
   }
 
   function renderFooter() {
@@ -245,8 +237,8 @@
       (title ? '<strong>' + esc(title) + '</strong>' : '') +
       (body ? '<div>' + body + '</div>' : '') + '</div>';
   }
-  function signInButtonHtml(large, next) {
-    return '<a href="' + loginHref(next) + '" class="btn btn-primary' + (large ? ' btn-lg' : '') + '">使用 GitHub 登录</a>';
+  function signInButtonHtml(large) {
+    return '<a href="' + LOGIN_HREF + '" class="btn btn-primary' + (large ? ' btn-lg' : '') + '">使用 GitHub 登录</a>';
   }
   function quotaHtml(quota) {
     if (!quota) return '<div class="skeleton" style="height:96px"></div>';
@@ -286,7 +278,7 @@
       main().innerHTML =
         pageHeadHtml('自测通道', 'ArcBench 自测',
           '上传 app 的 zip 包，在正式评测环境中运行题目测试并查看结果。自测结果不计入成绩。',
-          signInButtonHtml(true, '/') + '<span class="meta">仅读取 GitHub 公开资料，用于识别选手和统计次数</span>') +
+          signInButtonHtml(true) + '<span class="meta">仅读取 GitHub 公开资料，用于识别选手和统计次数</span>') +
         '<section class="section" aria-labelledby="rules">' +
         '<div class="section-title"><h2 id="rules">说明</h2></div>' +
         rulesTableHtml() + '</section>';

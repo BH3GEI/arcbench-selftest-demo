@@ -199,21 +199,78 @@ real shared build" below.
   pass/fail tabs, waiting/polling state, theme toggle (dark default, same as
   the competition site). Copy strings are duplicated by hand from the TSX —
   **when wording changes in `actions/web`, mirror it in `app.js`**.
-- `server/app/web_auth.py` + new routes in `server/app/main.py` —
-  GitHub OAuth for this channel (`/api/auth/github/login`,
-  `/api/auth/github/callback`, `/api/auth/logout`, `/api/me`), independent
-  of `actions/web`'s NextAuth setup: **a separate GitHub OAuth App with its
-  own client id/secret and callback URL**, configured via
-  `SELFTEST_GITHUB_OAUTH_CLIENT_ID`/`_SECRET` (see `.env.example`). Session
-  is a signed cookie (`SELFTEST_WEB_SESSION_SECRET`), not a DB-backed
-  session store. A signed-in GitHub login becomes its own "team" for the
-  existing quota/ownership system (`team = github login`) — `X-Team-Token`
-  auth is untouched and still works for non-browser callers.
-- `server/app/tasks_web.py` — `/api/tasks` for the picker, with the same
-  unlisted-task-ids/display-name filtering as
+- GitHub login itself is **not** this pass's work — it's
+  `server/app/oauth_github.py` + `server/app/auth.py`'s `GitHubCookieAuth`
+  (§ below has the reconciliation story: both landed concurrently, that one
+  won). This pass only added the two small *read* endpoints the web UI
+  needs on top of it, both in `server/app/main.py`: `GET /api/me` (decodes
+  the session cookie via `auth.verify_session` and returns
+  `{githubId, login}`, or 401 `{"error": "sign in required"}`) and
+  `GET /api/tasks` (gated by the existing `team_of()` helper — works with
+  either the session cookie or `X-Team-Token`, not GitHub-login-specific).
+- `server/app/tasks_web.py` — the task list `/api/tasks` serves, with the
+  same unlisted-task-ids/display-name filtering as
   `actions/web/lib/taskVisibility.ts`. **Keep the two lists in sync by
   hand** (also mirrored a third time as `DISPLAY_NAMES` in `app.js`, so the
   submit page can show a title before `/api/tasks` has loaded).
+- `server/app/main.py` also now mounts `/static` (`StaticFiles`) so
+  `app.css`/`app.js` are actually servable — previously only `/` (the HTML
+  shell) had a route.
+
+### Two GitHub-OAuth implementations landed concurrently — which one survived
+
+While this pass was building GitHub login for the web UI
+(`server/app/web_auth.py`, routes under `/api/auth/github/*`, team keyed by
+GitHub *login*), a separate security-hardening pass landed
+`server/app/oauth_github.py` + `auth.py`'s `GitHubCookieAuth`
+(`SELFTEST_AUTH_MODE=github`, routes under `/auth/github/*`, team keyed by
+the GitHub numeric **id**) on `main` first. Kept that one and deleted
+`web_auth.py` entirely rather than running both:
+
+- it's the more complete implementation — the `api`/`worker` role split
+  (`SELFTEST_ROLE`), `SELFTEST_FORCE_HTTPS`, and `min_account_age_days` all
+  already existed as config surface other parts of the server now depend on;
+- keying identity on the GitHub numeric id instead of the login name is
+  more correct (a login/username can be renamed; the id can't) and is
+  called out in that implementation's own docstring as intentionally
+  matching `actions/web`'s NextAuth identity choice;
+- running two independent session-cookie schemes side by side would have
+  been a real security smell, not just duplicated code.
+
+**Frontend-visible consequences of that choice** (`app.js` was written
+against `web_auth.py`'s contract first, then adjusted):
+
+- Login/logout links are `/auth/github/login` and `/auth/logout` (no `/api`
+  prefix) — `oauth_github.py`'s routes, not this pass's originally-built
+  `/api/auth/github/*`.
+- `/auth/github/login` has no `?next=` support — it always lands back on
+  `/` after a successful login, unlike `actions/web`'s NextAuth
+  `callbackUrl` (which does return the user to where they started). A
+  participant who clicks "使用 GitHub 登录" from the submit page lands on
+  the home page, not back on that submit page. Minor UX gap, not fixed here
+  since it means changing `oauth_github.py`'s own contract.
+- The session cookie only carries `github_id`/`github_login` (no avatar),
+  so unlike `actions/web`'s header (`session.user?.image`), `app.js`'s user
+  chip is text-only — matches what `actions/web/app/_ui/index.tsx` already
+  does post-redesign (it dropped the avatar `<img>` too), so this isn't
+  actually a gap.
+
+### Why not a real shared build
+
+The lead's instruction was to share one frontend source if practical. It
+isn't, cleanly: `actions/web` is a Next.js app built and deployed by Vercel
+from the `actions/web/` subtree (its own `package.json`, its own
+`next.config.mjs`); `server/app/static` is static files served directly by
+FastAPI, no Node toolchain in this process at all. Pointing Next's
+`globals.css` at a file outside `actions/web/` risks breaking Vercel's build
+(unclear whether its root-directory setting would even upload a sibling
+`shared/` folder), and `web-design`/`web-login` are actively iterating on
+`actions/web` — editing its files from here risked stepping on that work.
+So the CSS is a verbatim copy (framework-agnostic, safe to diff) and the JS
+is a parallel implementation against the same backend contract, not a
+shared bundle. If a real monorepo-wide frontend build is wanted later, the
+CSS is the one piece that's already literally identical and would need zero
+rework to extract.
 
 ### Why not a real shared build
 
@@ -274,13 +331,15 @@ decision, left to grading/backend work rather than made here.
 
 ### Manual verification
 
-No GitHub OAuth App was registered for this channel (would need the lead's
-or an org owner's GitHub access), so the login→callback round trip itself
-is untested end-to-end — covered instead by unit tests
-(`tests/test_web_auth.py`) for the session cookie, state-cookie CSRF check,
-and the routes' auth gating. Everything reachable without a real OAuth
-exchange was verified by running the server locally and driving it with a
-real browser: unauthenticated home, authenticated home/tasks/submit
+The login→callback round trip against real GitHub is covered by
+`tests/test_oauth_github.py` (GitHub's own HTTP calls monkeypatched — see
+that file); `/api/me` and `/api/tasks` by
+`tests/test_web_ui_endpoints.py`, using the same `auth.sign_session()`
+helper to forge a valid session cookie. Beyond that, everything was verified by running the server locally
+(`SELFTEST_SESSION_SECRET`, dummy OAuth client id/secret) and driving it
+with a real browser, with a session cookie set directly via
+`auth.sign_session()` to exercise the signed-in pages without a live
+GitHub round trip: unauthenticated home, authenticated home/tasks/submit
 (including drag-drop file selection and the quota-exhausted state),
 history table across all status pills (queued/running/passed/failed/system
 error), submission detail for passed/failed/hidden-visibility/queued/system
