@@ -8,8 +8,23 @@
 #
 # Required env: SUBMISSION_ID, TASK_ID, DOWNLOAD_URL
 # Optional env: VISIBILITY_OVERRIDE, CALLBACK_URL, CALLBACK_TOKEN,
-#               APP_DOWNLOAD_TOKEN, GH_TOKEN
+#               APP_DOWNLOAD_TOKEN, GH_TOKEN, SUBMISSION_TIMESTAMP,
+#               SUBMISSION_SIGNATURE, SELFTEST_DISPATCH_SIGNING_KEY
 set -uo pipefail
+
+retry() {
+  # retry <attempts> <sleep_s> -- <cmd...> — only for infra calls (download,
+  # pulling a prebuilt runner image), never for building/testing the
+  # submission itself: a flaky network shouldn't get 3 tries disguised as 1,
+  # but a genuinely broken submission shouldn't get any extra either.
+  local attempts="$1" sleep_s="$2" n=1
+  shift 2
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then return 1; fi
+    n=$((n + 1))
+    sleep "$sleep_s"
+  done
+}
 
 : "${SUBMISSION_ID:?missing SUBMISSION_ID}"
 : "${TASK_ID:?missing TASK_ID}"
@@ -57,11 +72,33 @@ req() {
   if [ -z "$line" ]; then echo "$2"; else echo "$line"; fi
 }
 
-if ! [[ "$TASK_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+# 0. authenticate the dispatch itself. This is also where per-team daily
+# quota lands on the Actions side (see README_ACTIONS.md "Quota"): the
+# self-test service signs {submission_id, task_id, timestamp} only *after*
+# its own quota.try_consume() succeeds, so a valid, fresh signature doubles
+# as proof quota was already checked — the grader never re-implements a
+# stateful counter. No-ops (passes) when SELFTEST_DISPATCH_SIGNING_KEY isn't
+# configured, e.g. local workflow_dispatch testing.
+SIG_ERR="$(python3 "$ROOT/scripts/verify_signature.py" \
+  --submission-id "$SUBMISSION_ID" --task-id "$TASK_ID" \
+  --timestamp "${SUBMISSION_TIMESTAMP:-0}" --signature "${SUBMISSION_SIGNATURE:-}" 2>&1 >/dev/null)"
+SIG_RC=$?
+if [ "$SIG_RC" -ne 0 ]; then
+  STATUS="error"; DETAIL="dispatch rejected: ${SIG_ERR:-invalid signature}"
+  # An unauthenticated request means submission_id/task_id/callback_url are
+  # all untrusted too — never POST to an attacker-supplied callback_url.
+  CALLBACK_URL=""
+fi
+
+if [ -z "$DETAIL" ] && ! [[ "$TASK_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   STATUS="error"; DETAIL="invalid task_id"
-elif [ ! -f "$REQ_FILE" ]; then
+fi
+
+if [ -z "$DETAIL" ] && [ ! -f "$REQ_FILE" ]; then
   STATUS="error"; DETAIL="unknown task_id: $TASK_ID"
-else
+fi
+
+if [ -z "$DETAIL" ]; then
   VISIBILITY="$(req visibility public)"
   if [ -n "${VISIBILITY_OVERRIDE:-}" ]; then VISIBILITY="$VISIBILITY_OVERRIDE"; fi
   APP_PORT="$(req app_port 3000)"
@@ -74,20 +111,17 @@ else
   # 1. download the submitted app zip (pre-signed URL expected; optional bearer
   # token for private storage). URL/token are never echoed. HTTPS only, with
   # size and time caps so a hostile URL cannot fill the disk or hang the job.
+  # Retried: this is infra, not the submission under test.
   CURL_OPTS=(-fsSL --proto =https --proto-redir =https --max-filesize 104857600 --max-time 120)
   DL_OK=0
   if [ -n "${APP_DOWNLOAD_TOKEN:-}" ]; then
-    curl "${CURL_OPTS[@]}" -H "Authorization: Bearer $APP_DOWNLOAD_TOKEN" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
+    retry 3 5 curl "${CURL_OPTS[@]}" -H "Authorization: Bearer $APP_DOWNLOAD_TOKEN" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
   else
-    curl "${CURL_OPTS[@]}" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
+    retry 3 5 curl "${CURL_OPTS[@]}" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
   fi
   if [ "$DL_OK" -ne 0 ]; then
     STATUS="error"; DETAIL="download failed"
   fi
-fi
-
-if [ "$STATUS" = "error" ] && [ -z "$DETAIL" ]; then
-  : # requirements missing path already set DETAIL above
 fi
 
 if [ -z "$DETAIL" ]; then
@@ -128,7 +162,7 @@ if [ -z "$DETAIL" ]; then
   # sees the app's source (only BASE_URL over the internal network).
   if [ -n "${GRADER_RUNNER_IMAGE:-}" ]; then
     RUNNER_IMAGE="$GRADER_RUNNER_IMAGE"
-    docker pull "$RUNNER_IMAGE" > /dev/null 2>&1 || true
+    retry 3 5 docker pull "$RUNNER_IMAGE" > /dev/null 2>&1 || true
   else
     docker build -q -t "$RUNNER_IMAGE" "$ROOT/runner" > /dev/null
   fi

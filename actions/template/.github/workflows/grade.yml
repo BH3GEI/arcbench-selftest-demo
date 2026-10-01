@@ -3,7 +3,12 @@ name: Grade submission
 # Two ways in:
 #  - repository_dispatch (event_type: grade-submission): the self-test
 #    service calls this with a service PAT after its own quota check passes.
-#    client_payload: { submission_id, task_id, download_url, callback_url? }
+#    client_payload: { submission_id, task_id, download_url, callback_url?,
+#                       submission_timestamp?, submission_signature? }
+#    submission_timestamp/signature: HMAC-SHA256 of "{submission_id}.
+#    {task_id}.{submission_timestamp}" with SELFTEST_DISPATCH_SIGNING_KEY,
+#    taken as proof quota was already checked — see scripts/verify_signature.py
+#    and README_ACTIONS.md "Quota" / "Submitter identity".
 #  - workflow_dispatch: manual/testing trigger with the same fields as inputs,
 #    plus visibility_override for exercising the hidden-visibility path
 #    without editing a task's requirements.yaml.
@@ -26,18 +31,36 @@ on:
         type: choice
         options: ["", public, hidden]
         default: ""
-
-permissions:
-  contents: write
-
-concurrency:
-  group: grade-${{ github.event.inputs.submission_id || github.event.client_payload.submission_id }}
-  cancel-in-progress: false
+      submission_timestamp:
+        required: false
+        type: string
+        description: "unix seconds; only needed to test signature rejection"
+      submission_signature:
+        required: false
+        type: string
+        description: "hex HMAC-SHA256; only needed to test signature rejection"
 
 jobs:
-  grade:
+  # Computes a bounded "lane" (hash of submission_id mod GRADE_LANES) so the
+  # grade job below can use it as a concurrency group: same submission_id
+  # always serializes against itself (no duplicate concurrent runs for one
+  # submission), and overall parallelism across *different* submissions is
+  # capped at GRADE_LANES regardless of how many dispatch at once. No
+  # repo checkout, no secrets, no write access needed for this.
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      submission_id: ${{ steps.in.outputs.submission_id }}
+      task_id: ${{ steps.in.outputs.task_id }}
+      download_url: ${{ steps.in.outputs.download_url }}
+      visibility_override: ${{ steps.in.outputs.visibility_override }}
+      callback_url: ${{ steps.in.outputs.callback_url }}
+      submission_timestamp: ${{ steps.in.outputs.submission_timestamp }}
+      submission_signature: ${{ steps.in.outputs.submission_signature }}
+      lane: ${{ steps.in.outputs.lane }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,8 +70,9 @@ jobs:
 
       # Payload fields go through env, never ${{ }} inside the script body, so
       # a crafted value cannot inject shell or extra $GITHUB_OUTPUT lines.
-      # visibility_override is only honoured for manual workflow_dispatch runs.
-      - name: Normalize inputs
+      # visibility_override is only honoured for manual workflow_dispatch runs
+      # — a repository_dispatch caller cannot override a task's own setting.
+      - name: Normalize inputs and compute lane
         id: in
         env:
           IN_SUBMISSION_ID: ${{ github.event.inputs.submission_id || github.event.client_payload.submission_id }}
@@ -56,6 +80,9 @@ jobs:
           IN_DOWNLOAD_URL: ${{ github.event.inputs.download_url || github.event.client_payload.download_url }}
           IN_VISIBILITY_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.visibility_override || '' }}
           IN_CALLBACK_URL: ${{ github.event.client_payload.callback_url || '' }}
+          IN_SUBMISSION_TIMESTAMP: ${{ github.event.inputs.submission_timestamp || github.event.client_payload.submission_timestamp || '' }}
+          IN_SUBMISSION_SIGNATURE: ${{ github.event.inputs.submission_signature || github.event.client_payload.submission_signature || '' }}
+          GRADE_LANES: "4"
         run: |
           set -euo pipefail
           ok() { [[ "$1" =~ $2 ]] || { echo "invalid $3" >&2; exit 1; }; }
@@ -64,23 +91,46 @@ jobs:
           ok "$IN_DOWNLOAD_URL" '^https://[^[:space:]]+$' download_url
           ok "$IN_VISIBILITY_OVERRIDE" '^(public|hidden)?$' visibility_override
           ok "$IN_CALLBACK_URL" '^(https://[^[:space:]]+)?$' callback_url
+          ok "$IN_SUBMISSION_TIMESTAMP" '^[0-9]*$' submission_timestamp
+          ok "$IN_SUBMISSION_SIGNATURE" '^[0-9a-fA-F]*$' submission_signature
+          LANE=$(( $(echo -n "$IN_SUBMISSION_ID" | cksum | cut -d' ' -f1) % GRADE_LANES ))
           {
             echo "submission_id=$IN_SUBMISSION_ID"
             echo "task_id=$IN_TASK_ID"
             echo "download_url=$IN_DOWNLOAD_URL"
             echo "visibility_override=$IN_VISIBILITY_OVERRIDE"
             echo "callback_url=$IN_CALLBACK_URL"
+            echo "submission_timestamp=$IN_SUBMISSION_TIMESTAMP"
+            echo "submission_signature=$IN_SUBMISSION_SIGNATURE"
+            echo "lane=$LANE"
           } >> "$GITHUB_OUTPUT"
+
+  grade:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    concurrency:
+      group: grade-lane-${{ needs.prepare.outputs.lane }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Grade
         env:
-          SUBMISSION_ID: ${{ steps.in.outputs.submission_id }}
-          TASK_ID: ${{ steps.in.outputs.task_id }}
-          DOWNLOAD_URL: ${{ steps.in.outputs.download_url }}
-          VISIBILITY_OVERRIDE: ${{ steps.in.outputs.visibility_override }}
-          CALLBACK_URL: ${{ steps.in.outputs.callback_url }}
+          SUBMISSION_ID: ${{ needs.prepare.outputs.submission_id }}
+          TASK_ID: ${{ needs.prepare.outputs.task_id }}
+          DOWNLOAD_URL: ${{ needs.prepare.outputs.download_url }}
+          VISIBILITY_OVERRIDE: ${{ needs.prepare.outputs.visibility_override }}
+          CALLBACK_URL: ${{ needs.prepare.outputs.callback_url }}
           CALLBACK_TOKEN: ${{ secrets.SELFTEST_CALLBACK_TOKEN }}
           APP_DOWNLOAD_TOKEN: ${{ secrets.APP_DOWNLOAD_TOKEN }}
+          SUBMISSION_TIMESTAMP: ${{ needs.prepare.outputs.submission_timestamp }}
+          SUBMISSION_SIGNATURE: ${{ needs.prepare.outputs.submission_signature }}
+          SELFTEST_DISPATCH_SIGNING_KEY: ${{ secrets.SELFTEST_DISPATCH_SIGNING_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/grade.sh
 
@@ -91,7 +141,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-${{ steps.in.outputs.submission_id }}
+          name: debug-${{ needs.prepare.outputs.submission_id }}
           path: .gradework/results
           retention-days: 3
           if-no-files-found: ignore

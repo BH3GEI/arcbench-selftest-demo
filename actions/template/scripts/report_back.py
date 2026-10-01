@@ -12,6 +12,8 @@ public Actions log. Two delivery modes:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -38,6 +40,14 @@ def main() -> int:
         token = os.environ.get("CALLBACK_TOKEN", "").strip()
         if token:
             req.add_header("Authorization", f"Bearer {token}")
+        # Same shared secret used to verify inbound dispatches (see
+        # verify_signature.py) also signs outbound results, so the self-test
+        # service can confirm a result really came from this grader and
+        # wasn't dropped in by anything else that can reach its callback URL.
+        signing_key = os.environ.get("SELFTEST_DISPATCH_SIGNING_KEY", "").strip()
+        if signing_key:
+            sig = hmac.new(signing_key.encode(), body, hashlib.sha256).hexdigest()
+            req.add_header("X-Signature", f"sha256={sig}")
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 print(f"[report_back] callback POST -> HTTP {resp.status}")
