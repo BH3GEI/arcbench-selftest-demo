@@ -143,6 +143,106 @@ path without editing a task's file — intended for testing the grader itself,
 not for production use (`repository_dispatch` payloads should rely on the
 task's own setting).
 
+## Web app
+
+A participant-facing site in `actions/web/` (Next.js, deployed on Vercel) —
+this is how participants actually use the grader; nobody gets access to the
+grader repo or triggers `workflow_dispatch`/`repository_dispatch` by hand.
+Not a leaderboard: results are only ever shown to the person who submitted.
+
+**Flow**: GitHub OAuth sign-in -> pick a task (name only, from the grader
+repo's `tasks/` directory listing) -> upload a zip -> queued/running/result
+view that polls until done -> history of your own past submissions.
+
+```
+participant's browser
+  |
+  v
+Next.js app on Vercel (actions/web/)
+  +-- GitHub OAuth (NextAuth) -- identifies the participant; their GitHub
+  |   OAuth access token is never stored or exposed to the browser, only
+  |   used by NextAuth during the login handshake itself
+  +-- Vercel Functions (API routes), server-side only:
+  |     - lists tasks/ dir names via a separate service PAT (not the
+  |       participant's token) — same least-privilege token this doc's
+  |       "Secrets & least privilege" section already describes
+  |     - validates the upload (zip magic bytes, size cap), checks
+  |       per-user + global daily quota and account-age gate
+  |     - uploads the zip to Vercel Blob, gets back a URL
+  |     - calls the grader repo's /dispatches API with a signed payload
+  |       (same HMAC scheme as "Submitter identity & quota" above — this
+  |       app signs outbound, the grader verifies; the grader signs its
+  |       result callback, this app verifies that too)
+  +-- /api/callback receives the grader's signed result, stores it
+  +-- participant polls /api/submissions/<id> until status != queued
+```
+
+**State**: no database — everything (submission records, daily quota
+counters) is small JSON objects in Vercel Blob (`state/submissions/*.json`,
+`state/quota/*.json`), keyed by an unguessable UUID (submissions) or a
+predictable-but-non-sensitive key (quota counters). Vercel KV would have
+been a more natural fit for the counters, but provisioning it currently
+requires a marketplace integration with an interactive "accept terms" step
+(no non-interactive path) — documented as a known limitation below rather
+than worked around.
+
+**Setup**:
+
+1. `actions/web/` is deployed as its own Vercel project with **Root
+   Directory** unset and deployed via `vercel deploy --prod --cwd
+   actions/web` (not Git-connected — this public repo gets many unrelated
+   commits, and an auto-deploy on every one of them would be pure waste;
+   deploy manually when `actions/web/` actually changes).
+2. Connect a Vercel Blob store to the project (`vercel storage create
+   <name> --type blob --access public`, then `vercel storage connect
+   <name> --project <project>`). No static token needed — the SDK picks up
+   `BLOB_STORE_ID` + the platform's own OIDC token automatically.
+3. **Disable deployment protection** (`ssoProtection` / password
+   protection) — Vercel's own project-level auth gate defaults to blocking
+   every `*.vercel.app` URL behind team SSO, which would stop participants
+   before they ever reach this app's own GitHub login. The site's auth is
+   GitHub OAuth, not Vercel's.
+4. Set project env vars (see `actions/web/.env.example` for the full list
+   and descriptions): `GITHUB_OAUTH_CLIENT_ID` / `_SECRET` (from the OAuth
+   App below), `NEXTAUTH_SECRET` (`openssl rand -base64 32`), `NEXTAUTH_URL`
+   (the deployed URL), `GRADER_SERVICE_TOKEN` / `GRADER_REPO_OWNER` /
+   `GRADER_REPO_NAME` (same grader repo this whole doc is about),
+   `SELFTEST_DISPATCH_SIGNING_KEY` (same value as the grader repo's secret
+   of the same name — this app and the grader sign/verify each other with
+   it), and optionally the `SELFTEST_WEB_*` abuse-prevention knobs.
+5. **Create the GitHub OAuth App** (must be done by a human on github.com —
+   there's no API for this part): go to
+   `https://github.com/settings/applications/new`, set
+   - Application name: anything descriptive, e.g. "arcbench self-test"
+   - Homepage URL: the deployed site's URL
+   - Authorization callback URL: `<deployed-url>/api/auth/callback/github`
+
+   Register, then "Generate a new client secret" on the app's page. Put the
+   Client ID and that secret into `GITHUB_OAUTH_CLIENT_ID` /
+   `GITHUB_OAUTH_CLIENT_SECRET`, redeploy.
+
+**Abuse prevention** (`SELFTEST_WEB_*` env vars, see `.env.example`):
+per-GitHub-account daily submission limit (default 10), a separate global
+daily limit across all users (protects against runaway Actions spend, not
+just one user), a zip size cap, and a minimum-GitHub-account-age gate
+(rejects brand-new accounts, default 7 days, 0 disables it). All four are
+checked server-side in `/api/submit` before anything is uploaded or
+dispatched; an unknown account-creation date fails *open* (doesn't block),
+since the GitHub API field is self-reported, optional and not worth hard-
+failing legitimate users over.
+
+**Known limitations**: quota counters are read-modify-write on Blob JSON,
+not atomic like a real counter — a rare race under heavy concurrent
+submissions from the same account could let one or two extra through, not
+a correctness issue at this scale. No Vercel KV (see above). The service
+token used for the grader repo (listing tasks, dispatching) needs the same
+least-privilege scoping called out in "Secrets & least privilege" — it
+currently reuses a broad personal token for this verification, replace
+before real production use. No rate limiting on the API routes themselves
+beyond the quota checks (a participant could hammer `/api/submissions`
+freely; harmless since it's read-only and scoped to their own data, but
+worth a note).
+
 ## Submitter identity & quota
 
 `repository_dispatch` can be called by anyone holding a token with write
