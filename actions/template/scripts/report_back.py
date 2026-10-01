@@ -9,6 +9,17 @@ public Actions log. Two delivery modes:
     tagged with the submission id, with result.json as the only asset. The
     self-test service (or a human with repo access) reads it back out; the
     Actions run log itself is never the channel players see.
+
+Anti-forgery / anti-replay on the callback POST: the signed string is
+"{timestamp}.{nonce}.{sha256(body)}" (not the raw body alone), with
+X-Timestamp/X-Nonce/X-Signature headers carrying the three pieces. This lets
+the receiver reject a stale POST (stale timestamp) and a captured-and-
+resent one (seen nonce) even *within* the freshness window, the same two
+checks scripts/verify_signature.py already applies to the inbound dispatch.
+The receiver needs to persist seen nonces for at least the freshness window
+it enforces — the grader itself is stateless across runs and can't do that
+dedup; see README_ACTIONS.md "Callback verification" for the exact contract
+the self-test/web side should implement.
 """
 from __future__ import annotations
 
@@ -16,8 +27,10 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -43,10 +56,20 @@ def main() -> int:
         # Same shared secret used to verify inbound dispatches (see
         # verify_signature.py) also signs outbound results, so the self-test
         # service can confirm a result really came from this grader and
-        # wasn't dropped in by anything else that can reach its callback URL.
+        # wasn't dropped in by anything else that can reach its callback URL
+        # — and, with timestamp+nonce folded into the signed string, can't
+        # be forged or replayed (not even a byte-for-byte resend of a
+        # previously valid POST, which a body-only HMAC would accept forever
+        # within the freshness window).
         signing_key = os.environ.get("SELFTEST_DISPATCH_SIGNING_KEY", "").strip()
         if signing_key:
-            sig = hmac.new(signing_key.encode(), body, hashlib.sha256).hexdigest()
+            timestamp = str(int(time.time()))
+            nonce = secrets.token_hex(16)
+            body_hash = hashlib.sha256(body).hexdigest()
+            message = f"{timestamp}.{nonce}.{body_hash}".encode()
+            sig = hmac.new(signing_key.encode(), message, hashlib.sha256).hexdigest()
+            req.add_header("X-Timestamp", timestamp)
+            req.add_header("X-Nonce", nonce)
             req.add_header("X-Signature", f"sha256={sig}")
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
