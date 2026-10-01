@@ -242,7 +242,7 @@ export function ProgressBar({
 }) {
   return (
     <div
-      className={`bar ${tone ? `is-${tone}` : ''} ${indeterminate ? 'is-indeterminate' : ''}`}
+      className={`meter ${tone ? `is-${tone}` : ''} ${indeterminate ? 'is-indeterminate' : ''}`}
       role="progressbar"
       aria-label={label}
       aria-valuemin={0}

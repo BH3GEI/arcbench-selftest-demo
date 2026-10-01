@@ -476,6 +476,7 @@ pre {
   cursor: not-allowed;
 }
 .btn-primary {
+  text-transform: none;
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent);
@@ -774,23 +775,23 @@ pre {
   }
 }
 
-.bar {
+.meter {
   height: 4px;
   background: var(--line);
   overflow: hidden;
 }
-.bar > span {
+.meter > span {
   display: block;
   height: 100%;
   background: var(--accent);
 }
-.bar.is-success > span {
+.meter.is-success > span {
   background: var(--success);
 }
-.bar.is-danger > span {
+.meter.is-danger > span {
   background: var(--danger);
 }
-.bar.is-indeterminate > span {
+.meter.is-indeterminate > span {
   width: 30%;
   animation: slide 1.6s linear infinite;
 }
