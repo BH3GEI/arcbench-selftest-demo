@@ -408,12 +408,24 @@ message) is the web app's job, not this repo's.
   can't page around the limit), 1 CPU, 256 pids, read-only root fs with a
   64MB noexec `/tmp`, `no-new-privileges`, a handful of Linux capabilities
   dropped, log output capped (`--log-opt max-size=10m --log-opt max-file=1`).
-  Runner container — 2GB memory, 2 CPUs, 1024 pids, `no-new-privileges`, and
-  (see `runner/Dockerfile`) runs as the image's unprivileged `node` user so
-  Chromium's own namespace sandbox actually engages instead of needing
-  `--no-sandbox` — the test pack mount is already scoped to just the current
-  task's `tests/` (never the whole private task pack), so a browser exploit
-  in this container still can't reach any other task's content either way.
+  Runner container — 2GB memory, 2 CPUs, 1024 pids, `no-new-privileges`,
+  runs as the image's unprivileged `node` user, see "Browser sandbox".
+- **Browser sandbox**: Chromium's own sandbox stays on. It needs
+  unprivileged user namespaces, which GitHub's ubuntu-24.04 runner blocks by
+  default through AppArmor (`No usable sandbox!`). The `grade` job therefore
+  runs `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
+  first — the runner is a throwaway VM, so this only affects that one job —
+  and starts the runner container with Playwright's official seccomp
+  profile (`runner/seccomp_profile.json`, copied from microsoft/playwright
+  `utils/docker/seccomp_profile.json`: Docker's default profile plus
+  `clone`/`setns`/`unshare`) rather than `--cap-add=SYS_ADMIN`.
+  Fallback: `CHROMIUM_SANDBOX=0` (env for `scripts/grade.sh`) launches
+  Chromium with `--no-sandbox`. That trade-off is acceptable only because
+  the runner container's other limits still hold: it contains just the
+  current task's `tests/` (never the whole private task pack), holds no
+  secrets or tokens, has no internet access (internal Docker network), and
+  can reach only the app container. A browser exploit there could read
+  that one task's tests and nothing else.
 - **Download caps**: HTTPS only (`--proto =https`), 100MB max file size,
   120s max transfer time — a hostile or broken `download_url` can't fill the
   job's disk or hang it indefinitely.

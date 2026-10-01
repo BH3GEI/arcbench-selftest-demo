@@ -12,15 +12,13 @@ module.exports = {
     headless: true,
     baseURL: process.env.BASE_URL,
     screenshot: 'only-on-failure',
-    // Chromium's own sandbox needs unprivileged user namespaces, which
-    // Ubuntu 23.10+ disables by default (AppArmor) — confirmed via a real
-    // "FATAL: ... No usable sandbox!" failure on GitHub's ubuntu-latest,
-    // and `--security-opt apparmor=unconfined` on the container did NOT
-    // restore it (docs/parity.md, docs/security-review.md open item #3).
-    // Falling back to Chromium's own suggested workaround; the container
-    // itself still runs as a non-root user (Dockerfile's USER node), on an
-    // internal (no-internet) network, with no-new-privileges — defense in
-    // depth that doesn't depend on this one layer.
-    launchOptions: { chromiumSandbox: false },
+    // Chromium's own sandbox is on unless the caller sets CHROMIUM_SANDBOX=0.
+    // It needs unprivileged user namespaces: on GitHub's ubuntu-latest the
+    // grade job lifts AppArmor's restriction on them and runs this
+    // container with Playwright's seccomp profile (scripts/grade.sh). Off,
+    // the container still runs as a non-root user (Dockerfile's USER node),
+    // on an internal (no-internet) network, with no-new-privileges, holding
+    // only this task's tests and no secrets.
+    launchOptions: { chromiumSandbox: process.env.CHROMIUM_SANDBOX !== '0' },
   },
 };

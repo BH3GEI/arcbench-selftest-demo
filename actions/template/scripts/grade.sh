@@ -187,13 +187,19 @@ if [ -z "$DETAIL" ]; then
   # pack only *now*, after the app container exists — the app never sees the
   # tests dir (different container, no shared mount), and the runner never
   # sees the app's source (only BASE_URL over the internal network). Runs as
-  # a non-root user (see runner/Dockerfile); chromiumSandbox is off
-  # (playwright.config.js) since Chromium's own sandbox needs unprivileged
-  # user namespaces, which GitHub's ubuntu-latest disables by default
-  # (Ubuntu 23.10+ AppArmor restriction, confirmed not fixable via
-  # --security-opt apparmor=unconfined — docs/parity.md). $RESULTS is made
-  # world-writable first since the non-root uid otherwise can't write into
-  # a host bind-mount owned by whatever uid this job happens to run as.
+  # a non-root user (see runner/Dockerfile) with Chromium's own sandbox ON
+  # (CHROMIUM_SANDBOX=1 -> playwright.config.js). That sandbox needs
+  # unprivileged user namespaces: the workflow turns off Ubuntu 24.04's
+  # AppArmor restriction on them for this throwaway runner VM
+  # (kernel.apparmor_restrict_unprivileged_userns=0, see grade.yml), and the
+  # container gets Playwright's official seccomp profile
+  # (runner/seccomp_profile.json, from microsoft/playwright
+  # utils/docker/seccomp_profile.json: Docker's default profile plus
+  # clone/setns/unshare) instead of --cap-add=SYS_ADMIN. Set
+  # CHROMIUM_SANDBOX=0 to fall back to --no-sandbox (README_ACTIONS.md
+  # "Browser sandbox"). $RESULTS is made world-writable first since the
+  # non-root uid otherwise can't write into a host bind-mount owned by
+  # whatever uid this job happens to run as.
   chmod -R o+rwX "$RESULTS"
   if [ -n "${GRADER_RUNNER_IMAGE:-}" ]; then
     RUNNER_IMAGE="$GRADER_RUNNER_IMAGE"
@@ -219,6 +225,8 @@ if [ -z "$DETAIL" ]; then
       -e "READY_TIMEOUT=$READY_TIMEOUT_S" \
       --memory=2g --cpus=2.0 --pids-limit=1024 \
       --security-opt no-new-privileges \
+      --security-opt "seccomp=$ROOT/runner/seccomp_profile.json" \
+      -e "CHROMIUM_SANDBOX=${CHROMIUM_SANDBOX:-1}" \
       --shm-size=1g \
       -v "$TESTS_DIR:/pack:ro" \
       -v "$RESULTS:/results" \

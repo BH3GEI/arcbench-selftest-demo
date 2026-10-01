@@ -169,6 +169,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # Chromium's sandbox (kept on, see scripts/grade.sh) needs unprivileged
+      # user namespaces, which ubuntu-24.04 restricts via AppArmor. The
+      # runner is a throwaway VM, so this only affects this one job.
+      - name: Allow unprivileged user namespaces for the browser sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Grade
         id: run
         continue-on-error: true
