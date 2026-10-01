@@ -1,0 +1,78 @@
+name: Grade submission
+
+# Two ways in:
+#  - repository_dispatch (event_type: grade-submission): the self-test
+#    service calls this with a service PAT after its own quota check passes.
+#    client_payload: { submission_id, task_id, download_url, callback_url? }
+#  - workflow_dispatch: manual/testing trigger with the same fields as inputs,
+#    plus visibility_override for exercising the hidden-visibility path
+#    without editing a task's requirements.yaml.
+on:
+  repository_dispatch:
+    types: [grade-submission]
+  workflow_dispatch:
+    inputs:
+      submission_id:
+        required: true
+        type: string
+      task_id:
+        required: true
+        type: string
+      download_url:
+        required: true
+        type: string
+      visibility_override:
+        required: false
+        type: choice
+        options: ["", public, hidden]
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grade-${{ github.event.inputs.submission_id || github.event.client_payload.submission_id }}
+  cancel-in-progress: false
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Normalize inputs
+        id: in
+        run: |
+          set -euo pipefail
+          {
+            echo "submission_id=${{ github.event.inputs.submission_id || github.event.client_payload.submission_id }}"
+            echo "task_id=${{ github.event.inputs.task_id || github.event.client_payload.task_id }}"
+            echo "download_url=${{ github.event.inputs.download_url || github.event.client_payload.download_url }}"
+            echo "visibility_override=${{ github.event.inputs.visibility_override || github.event.client_payload.visibility_override || '' }}"
+            echo "callback_url=${{ github.event.client_payload.callback_url || '' }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Grade
+        env:
+          SUBMISSION_ID: ${{ steps.in.outputs.submission_id }}
+          TASK_ID: ${{ steps.in.outputs.task_id }}
+          DOWNLOAD_URL: ${{ steps.in.outputs.download_url }}
+          VISIBILITY_OVERRIDE: ${{ steps.in.outputs.visibility_override }}
+          CALLBACK_URL: ${{ steps.in.outputs.callback_url }}
+          CALLBACK_TOKEN: ${{ secrets.SELFTEST_CALLBACK_TOKEN }}
+          APP_DOWNLOAD_TOKEN: ${{ secrets.APP_DOWNLOAD_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/grade.sh
+
+      # Debugging aid for whoever maintains this grader repo, not for
+      # participants (who never have access to this repo or its artifacts).
+      # Safe to delete if you don't want build/runner logs retained at all.
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ steps.in.outputs.submission_id }}
+          path: .gradework/results
+          retention-days: 3
+          if-no-files-found: ignore

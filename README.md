@@ -16,6 +16,8 @@
 - `examples/` 示例 app（正常版和故意坏的版本）和示例测试
 - `scripts/e2e-demo.sh` 端到端演示
 - `tests/` 单元测试
+- `actions/` 第二条评测通道：基于 GitHub Actions 的评测器模板，题目放在独立私有仓库。
+  见 [`actions/README_ACTIONS.md`](actions/README_ACTIONS.md)。
 
 ## 运行
 ```

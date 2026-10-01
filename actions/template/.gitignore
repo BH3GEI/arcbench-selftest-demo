@@ -1,0 +1,4 @@
+results/
+.gradework/
+*.zip
+.DS_Store
