@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arcbench 自测通道 demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin: .8rem 0 .3rem; font-size: .9rem; color: #555; }
+  input, button { font-size: .95rem; padding: .4rem .6rem; }
+  button { cursor: pointer; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+  .pass { color: #137333; } .fail { color: #c5221f; } .muted { color: #777; font-size: .85rem; }
+  pre { background: #f6f8fa; padding: .6rem; border-radius: 6px; overflow-x: auto; font-size: .8rem; }
+  img.shot { max-width: 100%; border: 1px solid #ddd; margin-top: .4rem; }
+  #quota { font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>arcbench 自测通道（demo）</h1>
+<p class="muted">上传已构建的 app（含 Dockerfile 的 zip），几分钟后得到逐条测试结果。结果仅提交者本人可见，不影响正式成绩。</p>
+
+<div class="card">
+  <label>队伍 token</label>
+  <input id="token" size="30" placeholder="demo-token">
+  <span id="quota"></span>
+</div>
+
+<div class="card">
+  <label>app zip（根目录须含 Dockerfile）</label>
+  <input type="file" id="file" accept=".zip">
+  <button id="submit">提交自测</button>
+  <span id="msg"></span>
+</div>
+
+<div class="card">
+  <b>我的提交</b>
+  <div id="list" class="muted">暂无</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const tokenInput = $('token');
+tokenInput.value = localStorage.getItem('selftest-token') || 'demo-token';
+tokenInput.onchange = () => { localStorage.setItem('selftest-token', tokenInput.value); refresh(); };
+
+function headers() { return { 'X-Team-Token': tokenInput.value }; }
+
+async function api(path, opts) {
+  const res = await fetch(path, { headers: headers(), ...opts });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+async function refresh() {
+  try {
+    const q = await api('/api/quota');
+    $('quota').textContent = `今日配额：${q.used}/${q.limit}，剩余 ${q.remaining}`;
+  } catch (e) { $('quota').textContent = e.message; }
+  try {
+    const subs = await api('/api/submissions');
+    $('list').innerHTML = subs.length ? '' : '暂无';
+    for (const s of subs) {
+      const div = document.createElement('div');
+      div.innerHTML = `<a href="#" data-id="${s.id}">${s.id}</a> <span class="muted">${s.status}</span>`;
+      div.querySelector('a').onclick = (ev) => { ev.preventDefault(); showResult(s.id); };
+      $('list').appendChild(div);
+    }
+  } catch {}
+}
+
+$('submit').onclick = async () => {
+  const f = $('file').files[0];
+  if (!f) { $('msg').textContent = '请选择 zip 文件'; return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  $('msg').textContent = '上传中…';
+  try {
+    const r = await api('/api/submissions', { method: 'POST', body: fd });
+    $('msg').textContent = `已受理 ${r.id}，评测中…`;
+    poll(r.id);
+  } catch (e) { $('msg').textContent = '提交失败：' + e.message; refresh(); }
+};
+
+async function poll(id) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 3000));
+    let rec;
+    try { rec = await api('/api/submissions/' + id); } catch (e) { $('msg').textContent = e.message; return; }
+    if (['done', 'failed', 'error'].includes(rec.status)) { render(rec); refresh(); return; }
+    $('msg').textContent = `${id}：${rec.status}…`;
+  }
+}
+
+function render(rec) {
+  const r = rec.result || {};
+  const div = document.createElement('div');
+  div.className = 'card';
+  let html = `<b>${rec.id}</b> — <span class="${r.failed ? 'fail' : 'pass'}">${rec.status}</span>
+    <div class="muted">通过率 ${r.pass_rate ?? '-'}%（${r.passed ?? 0}/${r.total ?? 0}）· 测试包哈希 ${String(r.pack_hash || '').slice(0, 16)}… · 用时 ${r.duration_s ?? '-'}s</div>`;
+  if (r.detail) html += `<pre>${escapeHtml(r.detail)}</pre>`;
+  for (const t of r.tests || []) {
+    html += `<div class="${t.ok ? 'pass' : 'fail'}">${t.ok ? '✓' : '✗'} ${escapeHtml(t.title)}</div>`;
+    if (!t.ok && t.error) html += `<pre>${escapeHtml(t.error.split('\n').slice(0, 6).join('\n'))}</pre>`;
+    if (!t.ok && t.screenshot) html += `<img class="shot" src="/api/submissions/${rec.id}/artifact?path=${encodeURIComponent(t.screenshot)}&token=${encodeURIComponent(tokenInput.value)}">`;
+  }
+  if (r.app_log) html += `<details><summary>app 日志</summary><pre>${escapeHtml(r.app_log)}</pre></details>`;
+  div.innerHTML = html;
+  document.body.appendChild(div);
+  $('msg').textContent = '';
+  div.scrollIntoView({ behavior: 'smooth' });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function showResult(id) {
+  const rec = await api('/api/submissions/' + id);
+  render(rec);
+}
+
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# One command: docker compose up --build
+# The server builds the Playwright runner image automatically on first use
+# (context mounted at /runner). Override any SELFTEST_* value in a local .env.
+services:
+  server:
+    build: ./server
+    image: selftest-server:local
+    ports:
+      - "8080:8080"
+    environment:
+      SELFTEST_DATA_DIR: /data
+      SELFTEST_HOST_DATA_DIR: ${PWD}/data
+      SELFTEST_TEST_PACK_DIR: /pack
+      SELFTEST_HOST_PACK_DIR: ${PWD}/examples/tests
+      SELFTEST_RUNNER_CONTEXT_DIR: /runner
+      SELFTEST_TEAM_TOKENS: ${SELFTEST_TEAM_TOKENS:-demo=demo-token}
+      SELFTEST_DAILY_LIMIT: ${SELFTEST_DAILY_LIMIT:-10}
+    volumes:
+      # The server orchestrates sibling containers through the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+      - ./examples/tests:/pack:ro
+      - ./runner:/runner:ro
+    restart: unless-stopped
