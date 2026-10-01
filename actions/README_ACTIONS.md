@@ -620,7 +620,66 @@ service (already true via the existing daily quota).
   手动跑一次 `demo-todo` 的好 / 坏两种 app，确认链路恢复正常，再对正式题目
   放量。
 
-## Verified run
+## Verified run — 2026-10-01 hardening pass
+
+Re-verified end to end against `BH3GEI/arcbench-grader-demo` after the
+`prepare`/`grade`/`report` job split, the `system_error`/`rejected` status
+vocabulary, the non-root Playwright runner, the real build-timeout kill, and
+the timestamp+nonce callback signing — i.e. confirming the hardening didn't
+just look right but actually grades correctly end to end. Each run's three
+jobs (`prepare` -> `grade` -> `report`) completed and the result (delivered
+via the fallback GitHub Release — no `CALLBACK_URL` configured for this
+test) matched expectations:
+
+- **Good app** (`test-fixtures/app-todo-good.zip`, `demo-todo`) — 5/5 pass.
+  Run: https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36894381492
+  Result: `{"status":"passed","passed":5,"total":5}` with full per-test
+  titles (`visibility: public`), release `result-harden1-good-001`.
+- **Bad app** (`app-todo-bad.zip`) — 1/5 pass. Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36894391530
+  Result: `{"status":"failed","passed":1,"total":5}`, release
+  `result-harden1-bad-001` — confirms a build-that-builds-but-fails-tests
+  app is `failed` (participant fault), not `system_error`.
+- **Hidden task** (good app against `demo-todo-hidden`, real
+  `visibility: hidden` task, not an override) — 5/5 pass, reduced to
+  `{"status":"passed","passed":5,"total":5}` with no `tests` key at all.
+  Run: https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36894412387
+  release `result-harden1-hidden-001`.
+- **Partial app ("60 分" case)** (`app-todo-partial.zip`) — 3/5 pass (60%).
+  Run: https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36894432667
+  Result: `{"status":"failed","passed":3,"total":5}`, release
+  `result-harden1-partial-001`.
+- **system_error simulation** — `download_url` pointed at a path that
+  doesn't exist in the repo (404), a real-shape infra fault (storage/URL
+  problem, nothing to do with the participant's app). Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36894441712
+  Result: `{"status":"system_error","passed":0,"total":0,"detail":"download
+  failed"}`, release `result-harden1-syserr-001` — confirms this path is
+  distinguishable from `failed` end to end, exactly the distinction the
+  self-test/web side needs to retry-without-charging-quota (see "Result
+  fields"). (The `report` job's GitHub-reported conclusion on this one run
+  showed `cancelled` despite every one of its steps, including the release
+  publish, completing successfully and the release existing with the
+  correct body — a GitHub Actions run-finalization display quirk, not a
+  pipeline defect; not reproduced on the other four runs.)
+- Chromium's own sandbox is confirmed engaged, not just configured: all
+  four scored runs above executed real Playwright tests inside the
+  non-root (`USER node`) runner container and produced correct per-test
+  results — a sandbox/permissions regression from running non-root would
+  have shown up as `system_error` ("runner exited N without a report"),
+  which none of them did.
+- Dispatch signatures for all five runs were computed with a freshly
+  rotated `SELFTEST_DISPATCH_SIGNING_KEY` (the grader repo's previous value
+  was a leftover from the last person who tested it, and isn't retrievable
+  from a write-only Actions secret) — **if anything else is already relying
+  on the old value, it needs to be updated to match**, since the grader
+  repo now expects a new one. No `SELFTEST_CALLBACK_TOKEN` is configured in
+  this repo, so the timestamp+nonce callback signing code path (vs. the
+  Release-fallback path exercised above) is covered by `report_back.py`'s
+  own logic review, not a live HTTP POST in this run — exercising it for
+  real needs a deployed callback endpoint to point `CALLBACK_URL` at.
+
+## Verified run — initial, 2026-09-xx
 
 Tested against a real private repo (`BH3GEI/arcbench-grader-demo`, private,
 initialized from this template) with the `demo-todo` task (5 tests),
