@@ -4,7 +4,7 @@ import { use, useRef, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Icon, MAX_ZIP_MB, Notice, QuotaCard, RequireAuth, useSubmissions, zhError } from '../../_ui';
+import { MAX_ZIP_MB, Notice, PageHead, Quota, RequireAuth, useSubmissions, zhError } from '../../_ui';
 import { taskDisplayName } from '@/lib/taskVisibility';
 
 function formatSize(bytes: number) {
@@ -13,9 +13,9 @@ function formatSize(bytes: number) {
 }
 
 function checkFile(f: File): string | null {
-  if (!/\.zip$/i.test(f.name)) return '只能上传 .zip 文件。';
-  if (f.size > MAX_ZIP_MB * 1024 * 1024) return `文件 ${formatSize(f.size)}，超过 ${MAX_ZIP_MB} MB 上限。`;
-  if (f.size === 0) return '文件是空的。';
+  if (!/\.zip$/i.test(f.name)) return '仅支持 .zip 文件。';
+  if (f.size > MAX_ZIP_MB * 1024 * 1024) return `文件大小 ${formatSize(f.size)}，超过 ${MAX_ZIP_MB} MB 上限。`;
+  if (f.size === 0) return '文件为空。';
   return null;
 }
 
@@ -68,19 +68,22 @@ function SubmitForm({ taskId }: { taskId: string }) {
   }
 
   return (
-    <main id="main" className="container page">
-      <div className="page-head">
-        <div>
-          <p className="subtle">
-            <Link href="/tasks">选择题目</Link> / 上传
-          </p>
-          <h1 style={{ marginTop: 'var(--s-1)', overflowWrap: 'anywhere' }}>{taskDisplayName(taskId)}</h1>
-          <p className="sub">上传 app 的 zip 包，系统会在正式评测环境中构建并运行这道题的测试。</p>
-        </div>
-      </div>
+    <main id="main" className="wrap">
+      <PageHead
+        kicker={
+          <>
+            <Link href="/tasks">提交</Link> / 上传
+          </>
+        }
+        title={taskDisplayName(taskId)}
+        lead="上传后，系统在正式评测环境中构建镜像并运行本题测试。"
+      >
+        <span className="meta">题目 ID {taskId}</span>
+      </PageHead>
 
-      <div className="split">
-        <form onSubmit={onSubmit} className="card stack" style={{ gap: 'var(--s-5)' }} aria-label="上传自测文件">
+      <div className="section cols">
+        <form onSubmit={onSubmit} className="stack" style={{ gap: 'var(--s-5)' }} aria-label="上传自测文件">
+          <div className="label">上传文件</div>
           <div
             className={`dropzone ${over ? 'is-over' : ''} ${file ? 'has-file' : ''}`}
             onDragOver={(e) => {
@@ -103,23 +106,21 @@ function SubmitForm({ taskId }: { taskId: string }) {
               onChange={(e) => pick(e.target.files?.[0])}
               disabled={busy}
             />
-            <span className="dropzone-icon">{file ? <Icon.file size={24} /> : <Icon.upload size={24} />}</span>
             {file ? (
               <>
-                <span className="title">已选择文件</span>
-                <span className="file-pill">
-                  <span className="name">{file.name}</span>
-                  <span className="subtle">{formatSize(file.size)}</span>
+                <span className="label">已选择</span>
+                <span className="file">
+                  {file.name} · {formatSize(file.size)}
                 </span>
-                <span className="subtle">点击或拖入可更换</span>
+                <span className="subtle">点击或拖入其他文件可替换</span>
               </>
             ) : (
               <>
                 <label htmlFor="zip" className="title">
-                  把 zip 拖到这里，或<span style={{ color: 'var(--accent)' }}>点击选择文件</span>
+                  拖入 zip 文件，或点击选择
                 </label>
                 <span className="subtle" id="zip-help">
-                  仅支持 .zip，最大 {MAX_ZIP_MB} MB
+                  .zip 格式，不超过 {MAX_ZIP_MB} MB
                 </span>
               </>
             )}
@@ -131,8 +132,8 @@ function SubmitForm({ taskId }: { taskId: string }) {
             </Notice>
           )}
           {outOfQuota && (
-            <Notice tone="warning" title="今天的次数已用完">
-              明天 UTC 0 点（北京时间 8 点）重置。
+            <Notice tone="warning" title="今日次数已用完">
+              UTC 0:00（北京时间 8:00）重置。
             </Notice>
           )}
 
@@ -140,56 +141,59 @@ function SubmitForm({ taskId }: { taskId: string }) {
             <button className="btn btn-primary btn-lg" type="submit" disabled={!file || busy || outOfQuota}>
               {busy ? (
                 <>
-                  <span className="spinner" aria-hidden="true" /> 正在上传…
+                  <span className="spinner" aria-hidden="true" /> 上传中
                 </>
               ) : (
-                <>开始自测</>
+                '提交自测'
               )}
             </button>
             {file && !busy && (
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-lg"
                 onClick={() => {
                   setFile(null);
                   if (inputRef.current) inputRef.current.value = '';
                 }}
               >
-                移除文件
+                移除
               </button>
             )}
             <span className="spacer" />
-            {remaining !== null && <span className="subtle">提交后剩余 {Math.max(0, remaining - 1)} 次</span>}
+            {remaining !== null && <span className="meta">提交后剩余 {Math.max(0, remaining - 1)} 次</span>}
           </div>
         </form>
 
-        <aside className="stack">
-          <QuotaCard quota={quota} />
-          <section className="card" aria-labelledby="req">
-            <h2 id="req" style={{ fontSize: 'var(--fs-md)', marginBottom: 'var(--s-3)' }}>
+        <aside className="stack" style={{ gap: 'var(--s-8)' }}>
+          <Quota quota={quota} />
+          <section aria-labelledby="req">
+            <div className="label" id="req" style={{ marginBottom: 'var(--s-3)' }}>
               zip 格式要求
-            </h2>
-            <ol className="steps">
-              <li>
-                <span>
-                  zip <strong>根目录</strong>直接放 <code>Dockerfile</code>，不要再套一层文件夹。
-                </span>
-              </li>
-              <li>
-                <span>镜像启动后在容器内监听题目要求的端口，提供完整的 app。</span>
-              </li>
-              <li>
-                <span>
-                  不要打包 <code>node_modules</code>、<code>.git</code>、构建产物，总大小不超过 {MAX_ZIP_MB} MB。
-                </span>
-              </li>
-            </ol>
-            <pre style={{ marginTop: 'var(--s-4)', fontSize: 'var(--fs-xs)' }}>
-              {`my-app.zip
+            </div>
+            <table className="dl">
+              <tbody>
+                <tr>
+                  <th scope="row">根目录</th>
+                  <td>
+                    直接包含 <code>Dockerfile</code>，不要多套一层文件夹。
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">运行</th>
+                  <td>容器启动后监听题目要求的端口。</td>
+                </tr>
+                <tr>
+                  <th scope="row">大小</th>
+                  <td>
+                    不超过 {MAX_ZIP_MB} MB。不要包含 <code>node_modules</code>、<code>.git</code> 和构建产物。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <pre style={{ marginTop: 'var(--s-4)' }}>{`app.zip
 ├── Dockerfile
 ├── package.json
-└── src/ …`}
-            </pre>
+└── src/`}</pre>
           </section>
         </aside>
       </div>

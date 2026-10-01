@@ -4,9 +4,10 @@ import { use, useEffect, useRef, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import type { Submission, TestCaseResult } from '@/lib/types';
+import { taskDisplayName } from '@/lib/taskVisibility';
 import {
-  Icon,
   Notice,
+  PageHead,
   ProgressBar,
   RequireAuth,
   StatusBadge,
@@ -25,7 +26,7 @@ const TYPICAL_SECONDS = 5 * 60;
 
 // 后端可能附带的可选字段（截图、排队位置、预计等待），没有就不显示。
 type TestExtra = TestCaseResult & { screenshot?: string | null; screenshots?: string[]; durationMs?: number };
-type SubmissionExtra = Submission & { queuePosition?: number; etaSeconds?: number; startedAt?: number };
+type SubmissionExtra = Submission & { queuePosition?: number; etaSeconds?: number };
 
 function useNow(active: boolean) {
   const [now, setNow] = useState(() => Date.now());
@@ -42,62 +43,82 @@ function Waiting({ s, st }: { s: SubmissionExtra; st: UiStatus }) {
   const elapsed = (now - s.createdAt) / 1000;
   const eta = typeof s.etaSeconds === 'number' ? s.etaSeconds : Math.max(0, TYPICAL_SECONDS - elapsed);
   const queued = st === 'queued';
-  const steps = ['已上传', '排队', '构建镜像', '运行测试', '出结果'];
+  const steps = ['已上传', '排队', '构建镜像', '运行测试', '生成结果'];
   const active = queued ? 1 : 3;
 
   return (
-    <section className="card stack" style={{ gap: 'var(--s-5)' }} aria-live="polite">
-      <div className="waiting">
-        <span className={`orbit ${queued ? 'is-queued' : ''}`} aria-hidden="true" />
-        <div className="stack" style={{ gap: 'var(--s-1)' }}>
-          <h2 style={{ fontSize: 'var(--fs-xl)' }}>{queued ? '正在排队' : '正在评测'}</h2>
-          <p className="muted">
-            {queued && typeof s.queuePosition === 'number'
-              ? `前面还有 ${s.queuePosition} 个提交。`
-              : queued
-                ? '等待评测机空闲，马上开始。'
-                : '正在构建你的 app 并运行测试。'}
-          </p>
-          <p className="subtle">
-            已等待 {formatDuration(elapsed)}
-            {eta > 0 ? ` · 预计还需约 ${formatDuration(Math.ceil(eta / 30) * 30)}` : ' · 比平时稍久，请再等一下'}
-          </p>
-        </div>
+    <section className="section" aria-live="polite" aria-labelledby="wait-title">
+      <div className="section-title">
+        <h2 id="wait-title">{queued ? '排队中' : '评测中'}</h2>
       </div>
-      <ol className="timeline" aria-label="评测进度">
+      <table className="dl" style={{ maxWidth: 560 }}>
+        <tbody>
+          <tr>
+            <th scope="row">当前阶段</th>
+            <td>
+              {queued
+                ? typeof s.queuePosition === 'number'
+                  ? `排队中，前方 ${s.queuePosition} 个提交`
+                  : '等待评测机'
+                : '构建镜像并运行测试'}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">已等待</th>
+            <td className="mono">{formatDuration(elapsed)}</td>
+          </tr>
+          <tr>
+            <th scope="row">预计剩余</th>
+            <td className="mono">{eta > 0 ? `约 ${formatDuration(Math.ceil(eta / 30) * 30)}` : '超出常规耗时，请继续等待'}</td>
+          </tr>
+        </tbody>
+      </table>
+      <ol className="steps-line" aria-label="评测进度">
         {steps.map((label, i) => (
-          <li key={label} className={i < active ? 'done' : i === active ? 'active' : ''} aria-current={i === active ? 'step' : undefined}>
+          <li
+            key={label}
+            className={i < active ? 'done' : i === active ? 'active' : ''}
+            aria-current={i === active ? 'step' : undefined}
+          >
             {label}
           </li>
         ))}
       </ol>
-      <p className="subtle">页面会自动刷新，你可以先离开，稍后在「历史记录」里查看结果。</p>
+      <p className="subtle" style={{ marginTop: 'var(--s-5)' }}>
+        页面每 {POLL_MS / 1000} 秒自动刷新。可离开本页，稍后在历史记录中查看结果。
+      </p>
     </section>
   );
 }
 
-function Score({ s }: { s: Submission }) {
+function Score({ s, hidden }: { s: Submission; hidden: boolean }) {
   const r = s.result!;
   const p = pct(r.passed, r.total);
   const all = r.total > 0 && r.passed === r.total;
   const tone = all ? 'success' : r.passed === 0 ? 'danger' : undefined;
   return (
-    <section className="card score" aria-label="得分">
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <span className="card-title" style={{ margin: 0 }}>
-          通过测试
-        </span>
-        <span className={`subtle ${all ? 'tone-success' : ''}`}>
-          {all ? '全部通过' : `${r.total - r.passed} 条未通过`}
-        </span>
+    <section className="section" aria-labelledby="score-title">
+      <div className="section-title">
+        <h2 id="score-title">得分</h2>
       </div>
-      <div className="score-num">
-        <span className={`n ${all ? 'tone-success' : ''}`}>{r.passed}</span>
-        <span className="d">/ {r.total}</span>
-        <span className={`pct ${tone ? `tone-${tone}` : ''}`}>{p}%</span>
+      <div className="score">
+        <div className="score-num" aria-label={`通过 ${r.passed} 个，共 ${r.total} 个`}>
+          <span className={all ? 'tone-success' : undefined}>{r.passed}</span>
+          <span className="d">/ {r.total}</span>
+        </div>
+        <div className="score-side">
+          <span className="pct">
+            通过率 {p}% · {all ? '全部通过' : `${r.total - r.passed} 个未通过`}
+          </span>
+          <ProgressBar value={p} tone={tone} label={`通过率 ${p}%`} />
+        </div>
       </div>
-      <ProgressBar value={p} tone={tone} label={`通过率 ${p}%`} />
-      {r.detail && <p className="subtle">{r.detail}</p>}
+      {r.detail && <p className="subtle" style={{ marginTop: 'var(--s-4)' }}>{r.detail}</p>}
+      {hidden && (
+        <div style={{ marginTop: 'var(--s-5)' }}>
+          <Notice title="隐藏测试">本题只公布通过数量，不显示每条测试的内容和报错。</Notice>
+        </div>
+      )}
     </section>
   );
 }
@@ -107,19 +128,17 @@ function TestRow({ t }: { t: TestExtra }) {
   const hasBody = Boolean((!t.ok && t.error) || shots.length);
   const head = (
     <>
-      <span className={`t-icon ${t.ok ? 'ok' : 'bad'}`}>{t.ok ? <Icon.check /> : <Icon.x />}</span>
+      <span className="t-state">
+        <span className={`pill ${t.ok ? 'pill-success' : 'pill-danger'}`}>{t.ok ? 'PASS' : 'FAIL'}</span>
+      </span>
       <span className="t-title">{t.title}</span>
-      <span className="sr-only">{t.ok ? '通过' : '未通过'}</span>
-      {typeof t.durationMs === 'number' && <span className="subtle mono">{(t.durationMs / 1000).toFixed(1)}s</span>}
+      {typeof t.durationMs === 'number' && <span className="meta">{(t.durationMs / 1000).toFixed(1)}s</span>}
     </>
   );
   if (!hasBody) {
     return (
       <div className="test">
-        <div className="test-head">
-          {head}
-          <span style={{ width: 16 }} />
-        </div>
+        <div className="test-head">{head}</div>
       </div>
     );
   }
@@ -127,20 +146,19 @@ function TestRow({ t }: { t: TestExtra }) {
     <details className="test">
       <summary>
         {head}
-        <span className="chev">
-          <Icon.chevron />
-        </span>
+        <span className="toggle" aria-hidden="true" />
       </summary>
       <div className="test-body">
         {!t.ok && t.error && (
           <>
-            <span className="subtle">报错信息</span>
+            <span className="label">报错</span>
             <pre>{t.error}</pre>
           </>
         )}
+        {shots.length > 0 && <span className="label">截图</span>}
         {shots.map((src, i) => (
           <a key={i} href={src} target="_blank" rel="noreferrer">
-            <img src={src} alt={`「${t.title}」的测试截图 ${i + 1}`} loading="lazy" />
+            <img src={src} alt={`测试「${t.title}」截图 ${i + 1}`} loading="lazy" />
           </a>
         ))}
       </div>
@@ -153,37 +171,33 @@ function Tests({ tests }: { tests: TestExtra[] }) {
   const [filter, setFilter] = useState<'all' | 'fail' | 'pass'>(failed ? 'fail' : 'all');
   const shown = tests.filter((t) => (filter === 'all' ? true : filter === 'fail' ? !t.ok : t.ok));
   const opts: [typeof filter, string][] = [
-    ['all', `全部 ${tests.length}`],
     ['fail', `未通过 ${failed}`],
     ['pass', `通过 ${tests.length - failed}`],
+    ['all', `全部 ${tests.length}`],
   ];
   return (
-    <section className="stack" aria-labelledby="tests-title">
-      <div className="row">
-        <h2 id="tests-title" style={{ fontSize: 'var(--fs-lg)' }}>
-          测试明细
-        </h2>
+    <section className="section" aria-labelledby="tests-title">
+      <div className="section-title">
+        <h2 id="tests-title">测试明细</h2>
         <span className="spacer" />
-        <div className="tabs" role="group" aria-label="筛选测试">
-          {opts.map(([k, label]) => (
-            <button key={k} type="button" aria-pressed={filter === k} onClick={() => setFilter(k)}>
-              {label}
-            </button>
-          ))}
-        </div>
+        <span className="meta">点击未通过的测试查看报错和截图</span>
+      </div>
+      <div className="tabs" role="group" aria-label="筛选测试">
+        {opts.map(([k, label]) => (
+          <button key={k} type="button" aria-pressed={filter === k} onClick={() => setFilter(k)}>
+            {label}
+          </button>
+        ))}
       </div>
       {shown.length === 0 ? (
-        <div className="card empty">
-          <p className="muted">{filter === 'fail' ? '没有未通过的测试 🎉' : '这里没有测试'}</p>
-        </div>
+        <p className="empty">{filter === 'fail' ? '没有未通过的测试。' : '无测试。'}</p>
       ) : (
-        <div className="tests">
+        <div>
           {shown.map((t, i) => (
             <TestRow key={`${filter}-${i}`} t={t} />
           ))}
         </div>
       )}
-      {failed > 0 && filter !== 'pass' && <p className="subtle">点击未通过的测试可展开查看报错和截图。</p>}
     </section>
   );
 }
@@ -203,7 +217,7 @@ function Detail({ id }: { id: string }) {
         const res = await fetch(`/api/submissions/${id}`, { cache: 'no-store' });
         const data = await res.json();
         if (!res.ok) {
-          setError(res.status === 404 ? '找不到这条提交记录。' : zhError(data.error || `加载失败（${res.status}）`));
+          setError(res.status === 404 ? '提交记录不存在。' : zhError(data.error || `加载失败（${res.status}）`));
           return;
         }
         if (stopped) return;
@@ -224,84 +238,78 @@ function Detail({ id }: { id: string }) {
 
   if (error) {
     return (
-      <main id="main" className="container page">
-        <Notice tone="danger" title="无法加载结果">
-          {error}
-        </Notice>
-        <p>
-          <Link href="/submissions">← 返回历史记录</Link>
-        </p>
+      <main id="main" className="wrap">
+        <PageHead kicker={<Link href="/submissions">历史记录</Link>} title="无法加载结果" />
+        <div className="section">
+          <Notice tone="danger">{error}</Notice>
+        </div>
       </main>
     );
   }
 
   if (!submission) {
     return (
-      <main id="main" className="container page" aria-busy="true">
-        <div className="skeleton" style={{ height: 32, width: 240 }} />
-        <div className="skeleton" style={{ height: 180 }} />
-        <span className="sr-only">正在加载结果…</span>
+      <main id="main" className="wrap" aria-busy="true">
+        <div className="page-head">
+          <div className="skeleton" style={{ height: 14, width: 120 }} />
+          <div className="skeleton" style={{ height: 56, width: 320, marginTop: 24 }} />
+        </div>
+        <span className="sr-only">正在加载结果</span>
       </main>
     );
   }
 
   const st = effectiveStatus(submission);
   const r = submission.result;
-  const hidden = r?.visibility === 'hidden' || (r && !r.tests);
+  const hidden = Boolean(r && (r.visibility === 'hidden' || !r.tests));
+  const resubmit = `/submit/${encodeURIComponent(submission.taskId)}`;
 
   return (
-    <main id="main" className="container page">
-      <div className="page-head">
-        <div>
-          <p className="subtle">
+    <main id="main" className="wrap">
+      <PageHead
+        kicker={
+          <>
             <Link href="/submissions">历史记录</Link> / 结果
-          </p>
-          <h1 style={{ marginTop: 'var(--s-1)', overflowWrap: 'anywhere' }}>{submission.taskId}</h1>
-          <p className="sub row" style={{ gap: 'var(--s-2)' }}>
-            <StatusBadge status={st} />
-            <span className="subtle">提交于 {formatTime(submission.createdAt)}</span>
-          </p>
-        </div>
-        <Link href={`/submit/${encodeURIComponent(submission.taskId)}`} className="btn">
-          <Icon.upload size={16} /> 再交一次
+          </>
+        }
+        title={taskDisplayName(submission.taskId)}
+      >
+        <StatusBadge status={st} />
+        <span className="meta">提交于 {formatTime(submission.createdAt)}</span>
+        <span className="meta">编号 {submission.id.slice(0, 8)}</span>
+        <span className="meta">题目 ID {submission.taskId}</span>
+        <span className="spacer" />
+        <Link href={resubmit} className="btn">
+          再次提交
         </Link>
-      </div>
+      </PageHead>
 
       {isPending(st) && <Waiting s={submission} st={st} />}
 
       {st === 'system_error' && (
-        <section className="card stack" style={{ alignItems: 'flex-start' }}>
+        <section className="section stack">
           <Notice tone="warning" title="评测系统出错，本次不计次数，请稍后重试">
-            这是评测系统自身的问题，不是你的 app 出了错。
+            问题出在评测系统，与提交的 app 无关。
           </Notice>
-          {r?.detail && <p className="subtle mono" style={{ overflowWrap: 'anywhere' }}>{r.detail}</p>}
-          <Link href={`/submit/${encodeURIComponent(submission.taskId)}`} className="btn btn-primary">
-            重新提交
-          </Link>
+          {r?.detail && <pre>{r.detail}</pre>}
+          <div>
+            <Link href={resubmit} className="btn btn-primary">
+              重新提交
+            </Link>
+          </div>
         </section>
       )}
 
-      {st === 'error' && r && r.total === 0 && (
-        <section className="card stack">
-          <Notice tone="danger" title="app 没能跑起来">
-            构建或启动失败，测试没有执行。请检查 Dockerfile 和启动命令后再试。
+      {(st === 'error' || st === 'failed') && r && r.total === 0 && (
+        <section className="section stack">
+          <Notice tone="danger" title="app 未能启动">
+            镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。
           </Notice>
           {r.detail && <pre>{r.detail}</pre>}
         </section>
       )}
 
-      {r && st !== 'system_error' && !isPending(st) && r.total > 0 && <Score s={submission} />}
-
-      {r && !isPending(st) && st !== 'system_error' && r.total > 0 && hidden && (
-        <div className="card row" style={{ gap: 'var(--s-3)' }}>
-          <span className="fact-icon">
-            <Icon.eyeOff />
-          </span>
-          <p className="muted" style={{ flex: 1, minWidth: 200 }}>
-            这道题是隐藏测试题，只显示通过数量，不显示每条测试的内容和报错。
-          </p>
-        </div>
-      )}
+      {r && !isPending(st) && st !== 'system_error' && r.total > 0 && <Score s={submission} hidden={hidden} />}
 
       {r && !hidden && r.tests && r.tests.length > 0 && <Tests tests={r.tests as TestExtra[]} />}
     </main>
