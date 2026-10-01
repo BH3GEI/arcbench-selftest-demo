@@ -57,7 +57,9 @@ req() {
   if [ -z "$line" ]; then echo "$2"; else echo "$line"; fi
 }
 
-if [ ! -f "$REQ_FILE" ]; then
+if ! [[ "$TASK_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  STATUS="error"; DETAIL="invalid task_id"
+elif [ ! -f "$REQ_FILE" ]; then
   STATUS="error"; DETAIL="unknown task_id: $TASK_ID"
 else
   VISIBILITY="$(req visibility public)"
@@ -70,13 +72,14 @@ else
   echo "[grade] submission=$SUBMISSION_ID task=$TASK_ID visibility=$VISIBILITY"
 
   # 1. download the submitted app zip (pre-signed URL expected; optional bearer
-  # token for private storage). URL/token are never echoed.
+  # token for private storage). URL/token are never echoed. HTTPS only, with
+  # size and time caps so a hostile URL cannot fill the disk or hang the job.
+  CURL_OPTS=(-fsSL --proto =https --proto-redir =https --max-filesize 104857600 --max-time 120)
+  DL_OK=0
   if [ -n "${APP_DOWNLOAD_TOKEN:-}" ]; then
-    DL_OK=0
-    curl -fsSL -H "Authorization: Bearer $APP_DOWNLOAD_TOKEN" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
+    curl "${CURL_OPTS[@]}" -H "Authorization: Bearer $APP_DOWNLOAD_TOKEN" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
   else
-    DL_OK=0
-    curl -fsSL "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
+    curl "${CURL_OPTS[@]}" "$DOWNLOAD_URL" -o "$WORK/app.zip" || DL_OK=1
   fi
   if [ "$DL_OK" -ne 0 ]; then
     STATUS="error"; DETAIL="download failed"
@@ -112,8 +115,11 @@ if [ -z "$DETAIL" ]; then
   docker run -d --name "$APP_CTR" --network "$NET" --network-alias app \
     --label "$LABEL" \
     -e "PORT=$APP_PORT" \
-    --memory=512m --cpus=1.0 --pids-limit=256 \
+    --memory=512m --memory-swap=512m --cpus=1.0 --pids-limit=256 \
     --read-only --tmpfs /tmp:rw,noexec,size=64m \
+    --security-opt no-new-privileges \
+    --cap-drop NET_RAW --cap-drop MKNOD --cap-drop SYS_CHROOT --cap-drop AUDIT_WRITE --cap-drop SETFCAP \
+    --log-opt max-size=10m --log-opt max-file=1 \
     "$IMAGE" > /dev/null
 
   # 5. Playwright runner container: mounted read-only with this task's test
@@ -131,14 +137,15 @@ if [ -z "$DETAIL" ]; then
     --label "$LABEL" \
     -e "BASE_URL=http://app:$APP_PORT" \
     -e "READY_TIMEOUT=$READY_TIMEOUT_S" \
-    --memory=2g --cpus=2.0 \
+    --memory=2g --cpus=2.0 --pids-limit=1024 \
+    --security-opt no-new-privileges \
     -v "$TESTS_DIR:/pack:ro" \
     -v "$RESULTS:/results" \
     "$RUNNER_IMAGE" > "$RESULTS/runner.log" 2>&1
   RUNNER_EXIT=$?
   set -e
 
-  docker logs "$APP_CTR" > "$RESULTS/app.log" 2>&1 || true
+  docker logs --tail 5000 "$APP_CTR" > "$RESULTS/app.log" 2>&1 || true
 
   if [ "$RUNNER_EXIT" -eq 124 ]; then
     STATUS="error"; DETAIL="test run exceeded ${RUN_TIMEOUT_S}s"
@@ -162,8 +169,9 @@ python3 "$ROOT/scripts/parse_report.py" \
   --report "$RESULTS/report.json" \
   --out "$RESULTS/result.json"
 
-echo "[grade] result:"
-cat "$RESULTS/result.json"
+# Only the headline goes to the job log; the full result (test titles, error
+# text for public tasks) is delivered by report_back.py below.
+python3 -c "import json,sys;r=json.load(open(sys.argv[1]));print('[grade] status=%s passed=%s/%s'%(r['status'],r['passed'],r['total']))" "$RESULTS/result.json"
 
 # 7. report back to the submitter (never via Actions logs).
 RESULT_FILE="$RESULTS/result.json" python3 "$ROOT/scripts/report_back.py"

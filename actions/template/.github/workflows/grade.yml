@@ -40,17 +40,36 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Keep the job token out of .git/config on disk, where the untrusted
+          # build step's process tree could otherwise read it.
+          persist-credentials: false
 
+      # Payload fields go through env, never ${{ }} inside the script body, so
+      # a crafted value cannot inject shell or extra $GITHUB_OUTPUT lines.
+      # visibility_override is only honoured for manual workflow_dispatch runs.
       - name: Normalize inputs
         id: in
+        env:
+          IN_SUBMISSION_ID: ${{ github.event.inputs.submission_id || github.event.client_payload.submission_id }}
+          IN_TASK_ID: ${{ github.event.inputs.task_id || github.event.client_payload.task_id }}
+          IN_DOWNLOAD_URL: ${{ github.event.inputs.download_url || github.event.client_payload.download_url }}
+          IN_VISIBILITY_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.visibility_override || '' }}
+          IN_CALLBACK_URL: ${{ github.event.client_payload.callback_url || '' }}
         run: |
           set -euo pipefail
+          ok() { [[ "$1" =~ $2 ]] || { echo "invalid $3" >&2; exit 1; }; }
+          ok "$IN_SUBMISSION_ID" '^[A-Za-z0-9_-]{1,64}$' submission_id
+          ok "$IN_TASK_ID" '^[A-Za-z0-9_-]{1,64}$' task_id
+          ok "$IN_DOWNLOAD_URL" '^https://[^[:space:]]+$' download_url
+          ok "$IN_VISIBILITY_OVERRIDE" '^(public|hidden)?$' visibility_override
+          ok "$IN_CALLBACK_URL" '^(https://[^[:space:]]+)?$' callback_url
           {
-            echo "submission_id=${{ github.event.inputs.submission_id || github.event.client_payload.submission_id }}"
-            echo "task_id=${{ github.event.inputs.task_id || github.event.client_payload.task_id }}"
-            echo "download_url=${{ github.event.inputs.download_url || github.event.client_payload.download_url }}"
-            echo "visibility_override=${{ github.event.inputs.visibility_override || github.event.client_payload.visibility_override || '' }}"
-            echo "callback_url=${{ github.event.client_payload.callback_url || '' }}"
+            echo "submission_id=$IN_SUBMISSION_ID"
+            echo "task_id=$IN_TASK_ID"
+            echo "download_url=$IN_DOWNLOAD_URL"
+            echo "visibility_override=$IN_VISIBILITY_OVERRIDE"
+            echo "callback_url=$IN_CALLBACK_URL"
           } >> "$GITHUB_OUTPUT"
 
       - name: Grade
