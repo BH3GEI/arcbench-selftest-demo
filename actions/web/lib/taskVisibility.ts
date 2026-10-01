@@ -3,10 +3,10 @@
 // their raw id) — add an entry only to rename or hide one.
 
 const DISPLAY_NAMES: Record<string, string> = {
-  'github-stage-1': 'GitHub 题 · 第一阶段',
+  'github-stage-1-req-test': 'GitHub 题 · 第一阶段',
 };
 
-const UNLISTED_TASK_IDS = new Set<string>(['demo-todo']);
+const UNLISTED_TASK_IDS = new Set<string>(['demo-todo', 'demo-todo-hidden']);
 
 export function isTaskListed(taskId: string): boolean {
   return !UNLISTED_TASK_IDS.has(taskId);
