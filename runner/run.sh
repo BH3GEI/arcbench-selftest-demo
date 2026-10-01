@@ -7,5 +7,12 @@ set -uo pipefail
 echo "[runner] probing $BASE_URL (timeout ${READY_TIMEOUT:-60}s)"
 node /opt/selftest/wait-ready.mjs || exit 3
 
-echo "[runner] app ready, running pack at ${PACK_TEST_DIR:-/pack}"
+# The pack's specs import '@playwright/test'; they resolve it through
+# /work/node_modules -> the runner image's global install.
+mkdir -p /work
+ln -sfn "$(npm root -g)" /work/node_modules
+rm -rf /work/pack
+cp -r /pack /work/pack
+
+echo "[runner] app ready, running pack"
 exec npx playwright test --config=/opt/selftest/playwright.config.js

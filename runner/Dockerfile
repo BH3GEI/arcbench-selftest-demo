@@ -4,9 +4,16 @@
 FROM node:24-bookworm-slim
 
 ARG PLAYWRIGHT_VERSION=1.57.0
-RUN npm install -g @playwright/test@${PLAYWRIGHT_VERSION} \
-    && npx playwright install --with-deps chromium \
-    && npm cache clean --force
+
+# Optional apt mirror for networks where deb.debian.org is slow, e.g.
+#   docker build --build-arg APT_MIRROR=mirrors.ustc.edu.cn ./runner
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+      sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
+    fi
+
+RUN npm install -g @playwright/test@${PLAYWRIGHT_VERSION} && npm cache clean --force
+RUN npx playwright install --with-deps chromium
 
 COPY playwright.config.js wait-ready.mjs run.sh /opt/selftest/
 RUN chmod +x /opt/selftest/run.sh

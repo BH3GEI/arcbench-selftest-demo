@@ -85,7 +85,7 @@ def parse_playwright_report(report_path: Path, results_dir: Path) -> tuple[list[
         title = f"{prefix} {suite.get('title', '')}".strip()
         for spec in suite.get("specs", []):
             name = f"{title} {spec.get('title', '')}".strip()
-            ran = [t for t in spec.get("tests", []) for r in [t.get("results", [])] if r]
+            ran = [r for t in spec.get("tests", []) for r in t.get("results", []) if r]
             ok = bool(ran) and all(
                 r.get("status") in ("passed", "expected") for r in ran
             ) and spec.get("ok", True)

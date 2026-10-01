@@ -32,4 +32,4 @@ def test_missing_pack_dir_raises(tmp_path):
 def test_count_tests(tmp_path):
     (tmp_path / "a.spec.ts").write_text("test('a');\ntest('b');")
     (tmp_path / "helper.ts").write_text("export const f = () => test;")
-    assert count_tests(tmp_path) == 3
+    assert count_tests(tmp_path) == 2
