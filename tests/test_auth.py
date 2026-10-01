@@ -20,13 +20,18 @@ def test_static_token_auth_unknown_token_rejected():
 
 
 def test_static_token_auth_dev_mode_passthrough():
-    auth = StaticTokenAuth({})
+    auth = StaticTokenAuth({}, allow_any_token=True)
     assert auth.authenticate("whatever-team") == "whatever-team"
+
+
+def test_static_token_auth_no_tokens_rejects_by_default():
+    with pytest.raises(AuthError):
+        StaticTokenAuth({}).authenticate("whatever-team")
 
 
 def test_static_token_auth_missing_token_rejected():
     with pytest.raises(AuthError):
-        StaticTokenAuth({}).authenticate(None)
+        StaticTokenAuth({}, allow_any_token=True).authenticate(None)
 
 
 def _sign(secret: str, team: str, ts: int) -> str:

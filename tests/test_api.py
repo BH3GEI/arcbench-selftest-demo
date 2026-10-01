@@ -44,10 +44,10 @@ def make_zip(files: dict[str, str]) -> bytes:
 VALID_ZIP = make_zip({"Dockerfile": "FROM scratch", "server.js": "ok"})
 
 
-def make_task(tasks_dir: Path, task_id: str = "t1") -> None:
+def make_task(tasks_dir: Path, task_id: str = "t1", visibility: str = "public") -> None:
     req_dir = tasks_dir / task_id / "requirements"
     req_dir.mkdir(parents=True)
-    (req_dir / "requirements.yaml").write_text("visibility: public\n")
+    (req_dir / "requirements.yaml").write_text(f"visibility: {visibility}\n")
     (tasks_dir / task_id / "tests").mkdir()
 
 

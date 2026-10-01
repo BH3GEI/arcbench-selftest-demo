@@ -18,7 +18,7 @@ from app.runner import EvalResult, TestCaseResult
 from app.store import Store
 from app.validate import ValidationError, validate_zip
 
-from test_api import VALID_ZIP, FakeEvaluator, submit, wait_done
+from test_api import VALID_ZIP, FakeEvaluator, make_task, submit, wait_done
 
 
 def test_no_tokens_configured_rejects_by_default(tmp_path):
@@ -33,8 +33,9 @@ def test_dev_mode_needs_explicit_opt_in(tmp_path):
 
 
 def _client(tmp_path, visibility="public"):
-    cfg = Config(data_dir=tmp_path / "data", pack_dir=tmp_path / "pack",
-                 visibility=visibility, allow_any_token=True).resolve()
+    cfg = Config(data_dir=tmp_path / "data", tasks_dir=tmp_path / "tasks",
+                 allow_any_token=True).resolve()
+    make_task(cfg.tasks_dir, "t1", visibility=visibility)
     store = Store(cfg.data_dir)
     result = EvalResult(status="failed", passed=0, failed=1, total=1, pack_hash="h",
                         tests=[TestCaseResult(title="secret title", ok=False,

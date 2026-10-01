@@ -108,9 +108,9 @@ def test_hidden_task_logs_and_artifacts_forbidden(client):
     wait_done(client.store, sub_id)
     (client.store.result_dir(sub_id) / "app.log").write_text("secret log")
     r = client.get(f"/api/submissions/{sub_id}/logs/app", headers={"X-Team-Token": "team-a"})
-    assert r.status_code == 403
+    assert r.status_code == 404
     r = client.get(f"/api/submissions/{sub_id}/artifact?path=app.log", headers={"X-Team-Token": "team-a"})
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_unknown_task_id_rejected(client):

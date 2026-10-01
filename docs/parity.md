@@ -120,7 +120,7 @@ all against the shared `tasks/demo-todo` (5 tests — see note below) and
 | `examples/app-todo` (good) | `demo-todo` (public) | all pass | **5/5 passed**, `pass_rate=100.0` |
 | `examples/app-todo-broken` | `demo-todo` (public) | mostly fail | **1/5 passed**, per-test error text present (e.g. `Test timeout of 60000ms exceeded.`) |
 | `examples/app-todo-partial` | `demo-todo` (public) | 60% | **3/5 passed, pass_rate=60.0** |
-| `examples/app-todo` (good) | `demo-todo-hidden` (hidden) | `{status,passed,total}` only | `{"status":"done","passed":5,"total":5}` — no `tests`, no `pack_hash`, no logs; `GET .../logs/app` → **403** |
+| `examples/app-todo` (good) | `demo-todo-hidden` (hidden) | `{status,passed,total}` only | `{"status":"done","passed":5,"total":5}` — no `tests`, no `pack_hash`, no logs; `GET .../logs/app` → **404** |
 
 This matches the Actions channel's own verified-run pattern in
 `actions/README_ACTIONS.md` (good app all-pass, broken app mostly-fail with
@@ -136,3 +136,40 @@ historical Actions run in `README_ACTIONS.md`'s "Verified run" section; that
 section documents a real run against the pre-unification pack and is a
 historical record, not a live assertion — `server-docs` may want to add a
 note there rather than rewrite it.
+
+## 6. Merged with concurrent security-hardening work
+
+A separate pass landed on `main` while this work was in progress (commit
+`c924aef` and the Actions-side HMAC-dispatch/retry/import-task commits) and
+had to be reconciled via rebase. Where both touched the same concern, this is
+what survived and why:
+
+- **Network alias wiring**: that pass found and fixed the same docker-py bug
+  independently (`networking_config` passed directly to `containers.run()`).
+  This branch keeps the `create()` + explicit `network.connect(..., aliases=["app"])`
+  + disconnect-default-bridge approach instead, because it's the one verified
+  against a live `docker run --network-alias app` control during this pass's
+  Docker-based verification (§3) — the inline `networking_config` form was
+  never confirmed to actually set the alias on this docker-py version.
+- **Visibility**: that pass added a single global `SELFTEST_VISIBILITY`
+  config value. This branch's per-task `requirements.yaml` visibility (§1)
+  is the one kept — a global switch can't express "task A is public, task B
+  is hidden," which is what both the lead's requirement and arcbench's own
+  task format need. `apply_visibility()` still masks hidden results to
+  exactly `{status, passed, total}`.
+- **Everything orthogonal was kept from both sides**: dev-mode auth gated
+  behind `SELFTEST_ALLOW_ANY_TOKEN` (rather than always trusting an
+  unconfigured server), screenshot-artifact serving restricted to paths
+  literally named in the result plus an image-extension allowlist (not just
+  "under the results dir"), a dual zip-size cap (compressed upload size +
+  uncompressed zip-bomb check, both now in `common/zipsafety.py`), streamed
+  upload reads with an early cutoff, container hardening
+  (`no-new-privileges`, capability drops, capped log size), rejected-upload
+  cleanup (no orphaned `app.zip` on disk), and `X-Content-Type-Options:
+  nosniff` on served files. Hidden-task log/artifact denials were
+  standardized on HTTP 404 (not 403) to match that pass's existing tests and
+  its "never reveal why" pattern.
+
+`server-docs` should also refresh `server/README_SERVER.md` — it still
+describes the pre-task-format flow (`SELFTEST_TEST_PACK_DIR`, no `task_id`
+in the submit example) and needs the task-based flow from §1 above.
