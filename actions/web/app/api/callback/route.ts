@@ -1,0 +1,42 @@
+import { NextResponse } from 'next/server';
+import { del } from '@vercel/blob';
+import { verifyCallbackSignature } from '@/lib/signature';
+import { getSubmission, saveSubmission } from '@/lib/store';
+import type { GradeResult } from '@/lib/types';
+
+// Receives the grader's result (scripts/report_back.py POSTs here when
+// CALLBACK_URL is set). Never trust the body until the signature checks out
+// — an unauthenticated caller could otherwise overwrite anyone's result.
+export async function POST(req: Request) {
+  const rawBody = await req.text();
+  const signature = req.headers.get('x-signature');
+  if (!verifyCallbackSignature(rawBody, signature)) {
+    return NextResponse.json({ error: 'bad signature' }, { status: 401 });
+  }
+
+  let result: GradeResult;
+  try {
+    result = JSON.parse(rawBody);
+  } catch {
+    return NextResponse.json({ error: 'invalid JSON' }, { status: 400 });
+  }
+
+  const existing = await getSubmission(result.submission_id);
+  if (!existing) {
+    return NextResponse.json({ error: 'unknown submission' }, { status: 404 });
+  }
+
+  existing.status = result.status;
+  existing.result = result;
+  existing.updatedAt = Date.now();
+  await saveSubmission(existing);
+
+  // Best-effort cleanup: the app zip has no further use once grading is done.
+  try {
+    await del(`submissions/${existing.id}.zip`);
+  } catch {
+    // non-fatal — a leftover blob costs storage, not correctness
+  }
+
+  return NextResponse.json({ ok: true });
+}
