@@ -15,6 +15,7 @@ should link here rather than duplicate the table.
 | 3 | App / Playwright container separation | Already correct in both channels — not changed in shape, only fixed to actually work (see §3 below). | App container: `--network=none` build, isolated internal network, no test-pack mount, only `BASE_URL` reachable from the runner. Playwright container: mounted with the task's `tests/` **read-only**, created and started only *after* the app container exists. Identical sequencing to `scripts/grade.sh`. |
 | 4 | Timeouts / resource limits / quota | Server's build/ready/run timeouts and `app_port` were **global config**, not per-task. | `build_timeout_s`, `ready_timeout_s`, `run_timeout_s`, `app_port` now come from the task's `requirements.yaml` via `common/taskspec.py`, same fields `grade.sh` reads. Resource caps (`--memory=512m --cpus=1.0 --pids-limit=256` for the app, `2g`/`2.0` for the runner) were already numerically identical between `docker_ops.py` and `grade.sh`; unchanged. Quota (`server/app/quota.py`) is unchanged and, per `README_ACTIONS.md`'s architecture, is the gate the (hypothetical) dispatch-to-Actions path reuses before ever calling the grader repo — there is nothing Actions-side to duplicate. |
 | 5 | Shared module (zip safety, result parsing, visibility, task loading) | Server and Actions each had their own zip-validation and Playwright-report-walking code, independently written and subtly different (see bug list below). | `actions/template/common/` (stdlib-only Python) is the single implementation; `server/app/validate.py`, `server/app/runner.py`, `server/app/jobs.py`, `server/app/main.py` import it directly (root `common` symlink), and `actions/template/scripts/{safe_unzip,parse_report}.py` + `scripts/grade.sh` (task lookup) call the same functions. See §2. |
+| 6 | Chromium sandbox in the Playwright container | Both channels launched Chromium with `chromiumSandbox: true`, which fails with `No usable sandbox!` where unprivileged user namespaces are blocked (GitHub's ubuntu-24.04 runner blocks them via AppArmor). | **Intentionally different.** Actions: sandbox **on** — the `grade` job runs `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (the runner is a throwaway VM, so only that job is affected) and starts the runner container with Playwright's official seccomp profile (`actions/template/runner/seccomp_profile.json`), no `SYS_ADMIN`; `CHROMIUM_SANDBOX=0` falls back to `--no-sandbox`. Server: that sysctl would change the whole long-lived host, so by default `chromiumSandbox: false` + non-root user + internal no-internet network + `no-new-privileges` (the runner container holds only the current task's tests and no secrets). If the host's owner allows that sysctl, the server can turn the sandbox on the same way as Actions (sysctl on the host + the same seccomp profile on the runner container + `chromiumSandbox: true`). |
 
 ## 2. The shared `common/` module
 
@@ -191,6 +192,11 @@ what survived and why:
   tested fallback — non-root user, the internal no-internet network, and
   `no-new-privileges` remain as defense-in-depth that doesn't depend on
   this one layer. Full detail in `docs/security-review.md` (open item #3).
+  Later the Actions channel turned the sandbox back on with
+  `sysctl kernel.apparmor_restrict_unprivileged_userns=0` (not the same thing
+  as `apparmor=unconfined`) plus Playwright's official seccomp profile,
+  verified on a real run; the server keeps the fallback by default. See
+  row 6 of the table in §1.
 - **Everything orthogonal was kept from both sides**: dev-mode auth gated
   behind `SELFTEST_ALLOW_ANY_TOKEN` (rather than always trusting an
   unconfigured server), screenshot-artifact serving restricted to paths
