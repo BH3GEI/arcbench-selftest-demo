@@ -10,10 +10,17 @@ from pathlib import Path
 
 import docker
 from docker.errors import ImageNotFound, NotFound
+from docker.types import LogConfig
 
 from .config import Config
 
 log = logging.getLogger("selftest.docker")
+
+# Bounded on-disk container logs, so a submission that floods stdout cannot
+# fill the host disk or blow up the server when the log is read back.
+CAPPED_LOGS = LogConfig(type=LogConfig.types.JSON, config={"max-size": "10m", "max-file": "1"})
+# Default Docker capabilities a web app does not need.
+APP_CAP_DROP = ["NET_RAW", "MKNOD", "SYS_CHROOT", "AUDIT_WRITE", "SETFCAP"]
 
 
 class BuildError(Exception):
@@ -85,10 +92,14 @@ class DockerOps:
             network_aliases=["app"],
             environment={"PORT": str(cfg.app_port)},
             mem_limit=cfg.app_mem,
+            memswap_limit=cfg.app_mem,
             nano_cpus=int(cfg.app_cpus * 1e9),
             pids_limit=cfg.app_pids,
             read_only=cfg.app_read_only,
             tmpfs={"/tmp": "rw,noexec,size=64m"} if cfg.app_read_only else None,
+            security_opt=["no-new-privileges"],
+            cap_drop=APP_CAP_DROP,
+            log_config=CAPPED_LOGS,
             labels={cfg.label: job_id},
         )
 
@@ -111,6 +122,9 @@ class DockerOps:
             },
             mem_limit="2g",
             nano_cpus=int(2 * 1e9),
+            pids_limit=1024,
+            security_opt=["no-new-privileges"],
+            log_config=CAPPED_LOGS,
             labels={cfg.label: job_id},
         )
         deadline = time.monotonic() + cfg.run_timeout_s
@@ -126,7 +140,7 @@ class DockerOps:
                     pass
                 return 124, f"runner exceeded {cfg.run_timeout_s}s and was killed"
             time.sleep(1)
-        logs = container.logs().decode("utf-8", errors="replace")
+        logs = container.logs(tail=5000).decode("utf-8", errors="replace")
         exit_code = int(container.attrs["State"].get("ExitCode", 1))
         try:
             container.remove(force=True)
@@ -136,11 +150,18 @@ class DockerOps:
 
     def container_logs(self, container) -> str:
         try:
-            return container.logs().decode("utf-8", errors="replace")
+            return container.logs(tail=5000).decode("utf-8", errors="replace")
         except Exception as exc:
             return f"<could not read app logs: {exc}>"
 
     # ------------------------------------------------------------------ cleanup
+    def remove_image(self, tag: str) -> None:
+        """Drop a submission's app image so built layers do not pile up on disk."""
+        try:
+            self.client.images.remove(tag, force=True)
+        except Exception:
+            pass
+
     def cleanup_job(self, job_id: str) -> None:
         for c in self.client.containers.list(all=True, filters={"label": f"{self.cfg.label}={job_id}"}):
             try:

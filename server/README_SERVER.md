@@ -104,14 +104,18 @@ shape arcbench expects, wiring in the real runner:
 
 ## Visibility
 
-This demo does not implement per-task visibility — every result returned by
-`GET /api/submissions/{id}` includes full per-test titles, pass/fail, and
-error text for the owning team. `assert_can_view` (`server/app/auth.py`)
-only gates *which team* can see a result (a team can never see another
-team's submissions); it does not reduce what a team sees of its own.
-Hidden-vs-public filtering the way `actions/` implements it (dropping
-`tests[]` down to `{status, passed, total}`) would need to be added at the
-`EvalResult` -> response boundary in `server/app/main.py` if a task needs it.
+One switch per deployment (the server runs a single test pack):
+
+- `SELFTEST_VISIBILITY=public` (default) — the owning team sees per-test
+  titles, pass/fail, error text, failure screenshots, and the app/runner logs.
+- `SELFTEST_VISIBILITY=hidden` — `GET /api/submissions/{id}` returns only
+  `status`, `passed`/`failed`/`total`, `pass_rate`, `pack_hash`, `duration_s`;
+  the log and artifact endpoints return 404.
+
+In both modes the artifact endpoint only serves screenshots named in the
+result, never `report.json` or Playwright's `output/` files.
+`assert_can_view` (`server/app/auth.py`) separately ensures a team can never
+see another team's submissions.
 
 ## What stays the same as the GitHub Actions channel
 
@@ -135,13 +139,15 @@ All environment variables, defaults, and what each maps to are listed in
 | Variable | Default | Meaning |
 |---|---|---|
 | `SELFTEST_TEAM_TOKENS` | *(empty)* | `team=token,team=token` — required to authenticate any request |
+| `SELFTEST_ALLOW_ANY_TOKEN` | `0` | Local development only: with no team tokens, treat any token string as its own team |
+| `SELFTEST_VISIBILITY` | `public` | `hidden` returns pass counts only (see Visibility) |
 | `SELFTEST_DAILY_LIMIT` | `10` | Submissions per team per day |
 | `SELFTEST_APP_PORT` | `3000` | Port injected into the submitted app container |
 | `SELFTEST_TEST_PACK_DIR` / `SELFTEST_HOST_PACK_DIR` | `examples/tests` | Container-side / host-side path to the Playwright test pack |
 | `SELFTEST_BUILD_TIMEOUT_S` | `600` | App build timeout |
 | `SELFTEST_READY_TIMEOUT_S` | `60` | How long to wait for the app to answer before giving up |
 | `SELFTEST_RUN_TIMEOUT_S` | `900` | Test execution timeout |
-| `SELFTEST_MAX_ZIP_MB` / `SELFTEST_MAX_ZIP_FILES` | `50` / `2000` | Upload caps enforced by `validate.py` |
+| `SELFTEST_MAX_ZIP_MB` / `SELFTEST_MAX_ZIP_FILES` / `SELFTEST_MAX_UNZIPPED_MB` | `50` / `2000` / `200` | Upload caps enforced by `validate.py` |
 | `SELFTEST_APP_MEM` / `SELFTEST_APP_CPUS` / `SELFTEST_APP_PIDS` | `512m` / `1.0` / `256` | Resource limits on the submitted app container |
 | `SELFTEST_RUN_NETWORK_INTERNAL` | on | Submitted app and runner share a network with no outbound internet |
 | `SELFTEST_JOB_WORKERS` | `1` | Concurrent job workers (builds are otherwise serial) |

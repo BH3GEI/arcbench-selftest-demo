@@ -10,7 +10,7 @@ class ValidationError(Exception):
     pass
 
 
-def validate_zip(zip_path: Path, max_mb: int, max_files: int) -> None:
+def validate_zip(zip_path: Path, max_mb: int, max_files: int, max_unzipped_mb: int = 200) -> None:
     if not zipfile.is_zipfile(zip_path):
         raise ValidationError("not a zip file")
     if zip_path.stat().st_size > max_mb * 1024 * 1024:
@@ -19,6 +19,8 @@ def validate_zip(zip_path: Path, max_mb: int, max_files: int) -> None:
         names = [i.filename for i in zf.infolist() if not i.is_dir()]
         if len(names) > max_files:
             raise ValidationError(f"zip has more than {max_files} files")
+        if sum(i.file_size for i in zf.infolist()) > max_unzipped_mb * 1024 * 1024:
+            raise ValidationError(f"zip expands to more than {max_unzipped_mb} MB")
         if "Dockerfile" not in names:
             raise ValidationError("zip must contain a Dockerfile at its root")
         for name in names:

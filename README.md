@@ -71,7 +71,7 @@ docker compose up
 | 运维负担 | 不需要自己的常驻服务，依赖 GitHub Actions | 需要自己部署、运维一个常驻服务 |
 | 题目存放 | 独立私有仓库的 `tasks/<task_id>/` | 一份测试包目录（`SELFTEST_TEST_PACK_DIR`），单部署单包 |
 | 隔离方式 | 隔离构建 + 无外网容器 + 内网 runner 容器 | 相同：隔离构建 + 无外网容器 + 内网 runner 容器 |
-| 可见性（hidden/public） | 按题目 `requirements.yaml` 过滤，已实现 | 未实现，按队隔离但同队内全量可见 |
+| 可见性（hidden/public） | 按题目 `requirements.yaml` 过滤，已实现 | 整个部署一个开关 `SELFTEST_VISIBILITY=hidden`（只回 `passed/total`），默认 public |
 | 结果回传 | 回调 API 或私有 Release，不经 Actions 日志 | HTTP API 轮询，结果存本地数据目录 |
 | 配额 | 复用 `server/app/quota.py` 的每队每天上限 | 同一套 `quota.py` 实现 |
 | 接入正式 arcbench runner | 未提供适配层 | `SELFTEST_EVALUATOR=arcbench`，见 `INTEGRATION.md` |

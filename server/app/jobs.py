@@ -32,8 +32,12 @@ class JobService:
         sub_dir.mkdir(parents=True, exist_ok=True)
         zip_path = sub_dir / "app.zip"
         zip_path.write_bytes(zip_bytes)
-        validate_zip(zip_path, self.cfg.max_zip_mb, self.cfg.max_zip_files)
-        self.quota.try_consume(team)  # raises QuotaExceeded; counts accepted submissions
+        try:
+            validate_zip(zip_path, self.cfg.max_zip_mb, self.cfg.max_zip_files, self.cfg.max_unzipped_mb)
+            self.quota.try_consume(team)  # raises QuotaExceeded; counts accepted submissions
+        except Exception:
+            shutil.rmtree(sub_dir, ignore_errors=True)  # rejected uploads leave nothing on disk
+            raise
         self.store.create(sub_id, team)
         self.pool.submit(self._run, sub_id)
         return sub_id

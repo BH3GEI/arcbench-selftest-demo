@@ -26,7 +26,9 @@ def team_for_token(cfg: Config, token: str | None) -> str:
         if team is None:
             raise AuthError("unknown team token")
         return team
-    # Dev mode: no tokens configured, the token string itself is the team id.
+    if not cfg.allow_any_token:
+        raise AuthError("no team tokens configured on the server")
+    # Dev mode (SELFTEST_ALLOW_ANY_TOKEN=1): the token string itself is the team id.
     return token
 
 

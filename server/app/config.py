@@ -61,9 +61,17 @@ class Config:
 
     daily_limit: int = _int("SELFTEST_DAILY_LIMIT", 10)
     team_tokens: dict[str, str] = field(default_factory=lambda: parse_team_tokens(os.environ.get("SELFTEST_TEAM_TOKENS", "")))
+    # Local development only: with no SELFTEST_TEAM_TOKENS, accept any token
+    # string as its own team id. Off unless explicitly enabled, so a server
+    # deployed without tokens refuses requests instead of trusting any caller.
+    allow_any_token: bool = field(default_factory=lambda: os.environ.get("SELFTEST_ALLOW_ANY_TOKEN", "0") == "1")
+    # "public": owning team sees per-test titles, errors, screenshots, logs.
+    # "hidden": owning team sees only status and pass counts.
+    visibility: str = field(default_factory=lambda: os.environ.get("SELFTEST_VISIBILITY", "public"))
 
     max_zip_mb: int = _int("SELFTEST_MAX_ZIP_MB", 50)
     max_zip_files: int = _int("SELFTEST_MAX_ZIP_FILES", 2000)
+    max_unzipped_mb: int = _int("SELFTEST_MAX_UNZIPPED_MB", 200)
 
     build_timeout_s: int = _int("SELFTEST_BUILD_TIMEOUT_S", 600)
     ready_timeout_s: int = _int("SELFTEST_READY_TIMEOUT_S", 60)

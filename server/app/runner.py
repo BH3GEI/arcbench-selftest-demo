@@ -163,5 +163,6 @@ class LocalDockerEvaluator:
             if app_container is not None:
                 result.app_log = ANSI.sub("", self.ops.container_logs(app_container))[-8000:]
             self.ops.cleanup_job(job_id)
+            self.ops.remove_image(image)
             result.duration_s = round(time.monotonic() - started, 1)
         return result
