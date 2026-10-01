@@ -35,3 +35,13 @@ test('deletes a todo', async ({ page }) => {
   await item.getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(page.getByText('ship it', { exact: true })).toHaveCount(0);
 });
+
+test('keeps several todos after reload', async ({ page }) => {
+  await page.getByLabel('What needs to be done?', { exact: true }).fill('first task');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await page.getByLabel('What needs to be done?', { exact: true }).fill('second task');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await page.reload();
+  await expect(page.getByText('first task', { exact: true })).toBeVisible();
+  await expect(page.getByText('second task', { exact: true })).toBeVisible();
+});
