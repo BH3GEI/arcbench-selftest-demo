@@ -8,12 +8,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.resultshape import apply_visibility, walk_report
+
+# The test browser itself failing to start happens before any page of the
+# submitted app is loaded — a grader-side fault, never the participant's.
+# Reported as system_error (not charged), not as "0/N tests failed".
+BROWSER_LAUNCH_FAILURE = re.compile(
+    r"browserType\.launch|No usable sandbox|Chromium sandboxing failed|Failed to launch the browser process"
+)
 
 
 def main() -> int:
@@ -54,7 +62,10 @@ def main() -> int:
             result["status"] = "system_error"
             result["detail"] = f"report.json unreadable: {exc}"
             tests = []
-        if tests:
+        if any(not t["ok"] and BROWSER_LAUNCH_FAILURE.search(t.get("error") or "") for t in tests):
+            result["status"] = "system_error"
+            result["detail"] = "test browser failed to start on the grader (not caused by the submitted app)"
+        elif tests:
             passed = sum(1 for t in tests if t["ok"])
             total = len(tests)
             result["passed"] = passed
