@@ -1,7 +1,7 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import { del } from '@vercel/blob';
 import { verifyCallbackSignature } from '@/lib/signature';
-import { getSubmission, recordResult, claimCallbackNonce } from '@/lib/store';
+import { getSubmission, recordResult, claimCallbackNonce, cacheScreenshots } from '@/lib/store';
 import type { GradeResult } from '@/lib/types';
 
 // Receives the grader's result (scripts/report_back.py POSTs here when
@@ -35,6 +35,10 @@ export async function POST(req: Request) {
   // re-run report job): first write wins, and that's still a success.
   const recorded = await recordResult(existing.id, result);
   if (!recorded) return NextResponse.json({ ok: true, duplicate: true });
+
+  // Copy failure screenshots out of the grader's short-lived debug artifact
+  // after responding, so they outlive it.
+  after(() => cacheScreenshots(existing.id, result).catch(() => undefined));
 
   // Best-effort cleanup: the app zip has no further use once grading is done.
   try {

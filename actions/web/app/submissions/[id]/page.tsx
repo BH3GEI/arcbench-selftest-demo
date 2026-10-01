@@ -13,6 +13,7 @@ import {
   StatusBadge,
   effectiveStatus,
   failureReason,
+  systemErrorZh,
   formatDuration,
   formatTime,
   isPending,
@@ -22,12 +23,14 @@ import {
 } from '../../_ui';
 
 const POLL_MS = 4000;
-// 没有服务端预估时的典型耗时（构建 + 跑测试），仅用于提示。
-const TYPICAL_SECONDS = 5 * 60;
+// 服务端没有给出 typicalSeconds（按近期真实提交统计）时的兜底值。
+const TYPICAL_SECONDS = 8 * 60;
+// 与服务端 store.ts 的 STALE_AFTER_MS 一致。
+const GIVE_UP_MINUTES = 30;
 
 // 后端可能附带的可选字段（截图、排队位置、预计等待），没有就不显示。
 type TestExtra = TestCaseResult & { screenshot?: string | null; screenshots?: string[]; durationMs?: number };
-type SubmissionExtra = Submission & { queuePosition?: number; etaSeconds?: number };
+type SubmissionExtra = Submission & { queuePosition?: number; etaSeconds?: number; typicalSeconds?: number | null };
 
 function useNow(active: boolean) {
   const [now, setNow] = useState(() => Date.now());
@@ -42,7 +45,8 @@ function useNow(active: boolean) {
 function Waiting({ s, st }: { s: SubmissionExtra; st: UiStatus }) {
   const now = useNow(true);
   const elapsed = (now - s.createdAt) / 1000;
-  const eta = typeof s.etaSeconds === 'number' ? s.etaSeconds : Math.max(0, TYPICAL_SECONDS - elapsed);
+  const typical = typeof s.typicalSeconds === 'number' ? s.typicalSeconds : TYPICAL_SECONDS;
+  const eta = typeof s.etaSeconds === 'number' ? s.etaSeconds : Math.max(0, typical - elapsed);
   const queued = st === 'queued';
   const steps = ['已上传', '排队', '构建镜像', '运行测试', '生成结果'];
   const active = queued ? 1 : 3;
@@ -72,6 +76,10 @@ function Waiting({ s, st }: { s: SubmissionExtra; st: UiStatus }) {
             <th scope="row">预计剩余</th>
             <td className="mono">{eta > 0 ? `约 ${formatDuration(Math.ceil(eta / 30) * 30)}` : '超出常规耗时，请继续等待'}</td>
           </tr>
+          <tr>
+            <th scope="row">通常耗时</th>
+            <td>约 {Math.max(1, Math.round(typical / 60))} 分钟（按近期提交统计，测试失败越多耗时越长）</td>
+          </tr>
         </tbody>
       </table>
       <ol className="steps-line" aria-label="评测进度">
@@ -86,9 +94,21 @@ function Waiting({ s, st }: { s: SubmissionExtra; st: UiStatus }) {
         ))}
       </ol>
       <p className="subtle" style={{ marginTop: 'var(--s-5)' }}>
-        页面每 {POLL_MS / 1000} 秒自动刷新。可离开本页，稍后在历史记录中查看结果。
+        页面每 {POLL_MS / 1000} 秒自动刷新。可离开本页，稍后在历史记录中查看结果。超过 {GIVE_UP_MINUTES}{' '}
+        分钟仍无结果会自动标记为系统错误，不扣次数，可直接重新提交。
       </p>
     </section>
+  );
+}
+
+// 评测机返回的原始英文信息，折叠起来，便于反馈问题时引用。
+function RawDetail({ detail }: { detail: string }) {
+  if (!/[a-z]/i.test(detail)) return null;
+  return (
+    <details>
+      <summary className="meta">原始信息</summary>
+      <pre>{detail}</pre>
+    </details>
   );
 }
 
@@ -114,7 +134,9 @@ function Score({ s, hidden }: { s: Submission; hidden: boolean }) {
           <ProgressBar value={p} tone={tone} label={`通过率 ${p}%`} />
         </div>
       </div>
-      {r.detail && <p className="subtle" style={{ marginTop: 'var(--s-4)' }}>{r.detail}</p>}
+      {r.detail && !/^\d+\/\d+ tests failed$/.test(r.detail) && (
+        <p className="subtle" style={{ marginTop: 'var(--s-4)' }}>{r.detail}</p>
+      )}
       {hidden && (
         <div style={{ marginTop: 'var(--s-5)' }}>
           <Notice title="隐藏测试">本题只公布通过数量，不显示每条测试的内容和报错。</Notice>
@@ -153,8 +175,11 @@ function Screenshot({ src, alt }: { src: string; alt: string }) {
   );
 }
 
-function TestRow({ t }: { t: TestExtra }) {
-  const shots = [...(t.screenshots ?? []), ...(t.screenshot ? [t.screenshot] : [])];
+function TestRow({ t, submissionId }: { t: TestExtra; submissionId: string }) {
+  // 评测机给的是相对评测结果目录的路径，经本站接口（校验本人）读取。
+  const shots = [...(t.screenshots ?? []), ...(t.screenshot ? [t.screenshot] : [])].map((p) =>
+    /^https?:\/\//.test(p) ? p : `/api/submissions/${submissionId}/screenshot?path=${encodeURIComponent(p)}`,
+  );
   const hasBody = Boolean((!t.ok && t.error) || shots.length);
   const head = (
     <>
@@ -194,7 +219,7 @@ function TestRow({ t }: { t: TestExtra }) {
   );
 }
 
-function Tests({ tests }: { tests: TestExtra[] }) {
+function Tests({ tests, submissionId }: { tests: TestExtra[]; submissionId: string }) {
   const failed = tests.filter((t) => !t.ok).length;
   const [filter, setFilter] = useState<'all' | 'fail' | 'pass'>(failed ? 'fail' : 'all');
   const shown = tests.filter((t) => (filter === 'all' ? true : filter === 'fail' ? !t.ok : t.ok));
@@ -222,7 +247,7 @@ function Tests({ tests }: { tests: TestExtra[] }) {
       ) : (
         <div>
           {shown.map((t, i) => (
-            <TestRow key={`${filter}-${i}`} t={t} />
+            <TestRow key={`${filter}-${i}`} t={t} submissionId={submissionId} />
           ))}
         </div>
       )}
@@ -317,9 +342,9 @@ function Detail({ id }: { id: string }) {
       {st === 'system_error' && (
         <section className="section stack">
           <Notice tone="warning" title="评测系统出错，本次不计次数，请稍后重试">
-            问题出在评测系统，与提交的 app 无关。
+            问题出在评测系统，与提交的 app 无关。{r?.detail ? systemErrorZh(r.detail) : ''}
           </Notice>
-          {r?.detail && <pre>{r.detail}</pre>}
+          {r?.detail && <RawDetail detail={r.detail} />}
           <div>
             <Link href={resubmit} className="btn btn-primary">
               重新提交
@@ -333,7 +358,7 @@ function Detail({ id }: { id: string }) {
           <Notice tone="danger" title={failureReason(r.detail).title}>
             {failureReason(r.detail).hint} 本次计入当日次数。
           </Notice>
-          {r.detail && <pre>{r.detail}</pre>}
+          {r.detail && <RawDetail detail={r.detail} />}
           <div>
             <Link href={resubmit} className="btn btn-primary">
               修改后重新提交
@@ -344,7 +369,7 @@ function Detail({ id }: { id: string }) {
 
       {r && !isPending(st) && st !== 'system_error' && r.total > 0 && <Score s={submission} hidden={hidden} />}
 
-      {r && !hidden && r.tests && r.tests.length > 0 && <Tests tests={r.tests as TestExtra[]} />}
+      {r && !hidden && r.tests && r.tests.length > 0 && <Tests tests={r.tests as TestExtra[]} submissionId={submission.id} />}
     </main>
   );
 }

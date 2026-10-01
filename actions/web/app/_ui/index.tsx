@@ -46,6 +46,22 @@ const FAILURE_ZH: [RegExp, string, string][] = [
   [/test run exceeded/i, '测试运行超时', '测试整体运行时间超过上限。'],
 ];
 
+const SYSTEM_ZH: [RegExp, string][] = [
+  [/test browser failed to start/i, '评测机上的测试浏览器未能启动。'],
+  [/download failed/i, '评测机下载提交文件失败。'],
+  [/produced no result|crashed or was killed/i, '评测任务异常中断，未产生结果。'],
+  [/runner exited|no report|report\.json unreadable|no tests collected/i, '测试执行器异常退出。'],
+  [/dispatch rejected/i, '评测请求未通过校验。'],
+  [/could not start grading/i, '评测任务未能启动。'],
+];
+
+/** system_error 的原因说明（中文）；评测超时等本来就是中文的原样返回。 */
+export function systemErrorZh(detail: string): string {
+  if (!/[a-z]/i.test(detail)) return detail;
+  for (const [re, zh] of SYSTEM_ZH) if (re.test(detail)) return zh;
+  return '';
+}
+
 export function failureReason(detail: string | undefined): { title: string; hint: string } {
   for (const [re, title, hint] of FAILURE_ZH) if (re.test(detail ?? '')) return { title, hint };
   return { title: 'app 未能运行', hint: '镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。' };

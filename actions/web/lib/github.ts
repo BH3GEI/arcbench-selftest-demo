@@ -62,15 +62,12 @@ export async function dispatchGrade(payload: {
   }
 }
 
-// Recovery path for a result whose callback never landed (see store.ts
-// reconcile): the grade job uploads its result.json as the artifact
-// `result-<submission_id>` — the exact file the report job POSTs — so read it
-// back from the grader repo. Needs Actions read access on the service token;
-// any failure just means "not recoverable yet".
-export async function fetchGraderResult(submissionId: string): Promise<GradeResult | null> {
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(submissionId)) return null;
+// Downloads the grader repo's newest unexpired artifact with this exact
+// name (needs Actions read access on the service token). Any failure just
+// means "not available".
+async function fetchArtifactZip(name: string): Promise<Buffer | null> {
   const repo = `${API}/repos/${config.graderRepoOwner}/${config.graderRepoName}`;
-  const res = await fetch(`${repo}/actions/artifacts?name=result-${submissionId}&per_page=5`, {
+  const res = await fetch(`${repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=5`, {
     headers: headers(),
     cache: 'no-store',
   });
@@ -91,8 +88,35 @@ export async function fetchGraderResult(submissionId: string): Promise<GradeResu
   const location = redirect.headers.get('location');
   const zipRes = location ? await fetch(location, { cache: 'no-store' }) : redirect;
   if (!zipRes.ok) return null;
-  const json = readZipEntry(Buffer.from(await zipRes.arrayBuffer()), 'result.json');
+  return Buffer.from(await zipRes.arrayBuffer());
+}
+
+// Recovery path for a result whose callback never landed (see store.ts
+// reconcile): the grade job uploads its result.json as the artifact
+// `result-<submission_id>` — the exact file the report job POSTs.
+export async function fetchGraderResult(submissionId: string): Promise<GradeResult | null> {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(submissionId)) return null;
+  const zip = await fetchArtifactZip(`result-${submissionId}`);
+  const json = zip ? readZipEntry(zip, 'result.json') : null;
   return json ? (JSON.parse(json.toString('utf8')) as GradeResult) : null;
+}
+
+// Failure screenshots only exist inside the grade job's debug artifact
+// (`debug-<submission_id>`, the whole results dir); result.json carries
+// their paths relative to it. Returns the requested entries that exist.
+export async function fetchGraderScreenshots(
+  submissionId: string,
+  paths: string[],
+): Promise<Map<string, Buffer>> {
+  const found = new Map<string, Buffer>();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(submissionId) || paths.length === 0) return found;
+  const zip = await fetchArtifactZip(`debug-${submissionId}`);
+  if (!zip) return found;
+  for (const p of paths) {
+    const data = readZipEntry(zip, p);
+    if (data) found.set(p, data);
+  }
+  return found;
 }
 
 // Minimal zip reader for the one small file inside an Actions artifact:

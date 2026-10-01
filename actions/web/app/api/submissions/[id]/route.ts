@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/session';
-import { getSubmission } from '@/lib/store';
+import { getSubmission, typicalGradingSeconds } from '@/lib/store';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getCurrentUser();
@@ -10,6 +10,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const submission = await getSubmission(id);
   if (!submission || submission.githubId !== user.githubId) {
     return NextResponse.json({ error: 'not found' }, { status: 404 });
+  }
+  if (submission.status === 'queued') {
+    const typicalSeconds = await typicalGradingSeconds().catch(() => null);
+    return NextResponse.json({ submission: { ...submission, typicalSeconds } });
   }
   return NextResponse.json({ submission });
 }

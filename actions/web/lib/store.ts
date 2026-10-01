@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { put, list, del } from '@vercel/blob';
 import type { Submission, GradeResult, SubmissionStatus } from './types';
-import { fetchGraderResult } from './github';
+import { fetchGraderResult, fetchGraderScreenshots } from './github';
 
 // Vercel KV turned out to need a marketplace integration with an
 // interactive "accept terms" step (no non-interactive provisioning path),
@@ -36,7 +36,7 @@ import { fetchGraderResult } from './github';
 //     still wins over it (see assembleSubmission).
 const RECOVER_AFTER_MS = 8 * 60 * 1000;
 const RECOVER_RETRY_MS = 60 * 1000;
-const STALE_AFTER_MS = 45 * 60 * 1000;
+const STALE_AFTER_MS = 30 * 60 * 1000;
 
 function submissionDir(id: string): string {
   return `state/submissions/${id}/`;
@@ -135,7 +135,7 @@ const FILE_KEYS: Record<string, keyof BlobUrls> = {
 };
 
 async function listAll(prefix: string) {
-  const blobs: { pathname: string; url: string }[] = [];
+  const blobs: { pathname: string; url: string; uploadedAt: Date }[] = [];
   let cursor: string | undefined;
   do {
     const page = await list({ prefix, cursor, limit: 1000 });
@@ -238,6 +238,97 @@ export async function listUserSubmissions(githubId: string, limit = 50): Promise
     .slice(0, limit);
   const subs = await Promise.all(mine.map(withReconcile));
   return subs.filter((s): s is Submission => s !== null);
+}
+
+// --- Failure screenshots: copied out of the grader's debug artifact (which
+// expires after a few days) into Blob, served only through the owner-checked
+// /api/submissions/<id>/screenshot route. ---
+
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
+const missingScreenshots = new Map<string, number>();
+
+function screenshotPaths(result: GradeResult | null): string[] {
+  const paths = new Set<string>();
+  for (const t of result?.tests ?? []) if (t.screenshot) paths.add(t.screenshot);
+  return [...paths];
+}
+
+function screenshotBlobPath(id: string, rel: string): string {
+  return `${submissionDir(id)}shots/${createHash('sha256').update(rel).digest('hex').slice(0, 32)}.png`;
+}
+
+export async function cacheScreenshots(id: string, result: GradeResult | null): Promise<Map<string, Buffer>> {
+  const shots = await fetchGraderScreenshots(id, screenshotPaths(result));
+  const valid = new Map<string, Buffer>();
+  for (const [rel, data] of shots) {
+    if (data.length > MAX_SCREENSHOT_BYTES || !data.subarray(0, 4).equals(PNG_MAGIC)) continue;
+    valid.set(rel, data);
+  }
+  await Promise.all(
+    [...valid].map(([rel, data]) =>
+      put(screenshotBlobPath(id, rel), data, {
+        access: 'public',
+        addRandomSuffix: false,
+        contentType: 'image/png',
+      }).catch(() => undefined), // already cached by a concurrent request
+    ),
+  );
+  return valid;
+}
+
+/** Only paths listed in this submission's own result are served. */
+export async function getScreenshot(sub: Submission, rel: string): Promise<Buffer | null> {
+  if (!screenshotPaths(sub.result).includes(rel)) return null;
+  const { blobs } = await list({ prefix: screenshotBlobPath(sub.id, rel) });
+  if (blobs[0]) {
+    const res = await fetch(blobs[0].url, { cache: 'no-store' });
+    if (res.ok) return Buffer.from(await res.arrayBuffer());
+  }
+  // Not cached yet (e.g. graded before caching existed): pull the artifact
+  // once, but don't hammer GitHub for one that has already expired.
+  if (Date.now() - (missingScreenshots.get(sub.id) ?? 0) < 5 * 60 * 1000) return null;
+  const cached = await cacheScreenshots(sub.id, sub.result).catch(() => new Map<string, Buffer>());
+  if (!cached.size) missingScreenshots.set(sub.id, Date.now());
+  return cached.get(rel) ?? null;
+}
+
+// --- Typical grading time, from real recent submissions (submit -> result),
+// for the waiting page's estimate. Cached per instance for a few minutes. ---
+
+const DEFAULT_TYPICAL_S = 8 * 60;
+let typicalCache: { at: number; seconds: number } | null = null;
+
+export async function typicalGradingSeconds(): Promise<number> {
+  if (typicalCache && Date.now() - typicalCache.at < 5 * 60 * 1000) return typicalCache.seconds;
+  const created = new Map<string, number>();
+  const results: { id: string; url: string; at: number }[] = [];
+  for (const b of await listAll('state/submissions/')) {
+    const [id, file] = b.pathname.slice('state/submissions/'.length).split('/');
+    if (file === 'created.json') created.set(id, b.uploadedAt.getTime());
+    if (file === 'result.json') results.push({ id, url: b.url, at: b.uploadedAt.getTime() });
+  }
+  const recent = results
+    .filter((r) => created.has(r.id))
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 30);
+  const samples = (
+    await Promise.all(
+      recent.map(async (r) => {
+        const stored = await fetchJson<StoredResult>(r.url).catch(() => null);
+        // Platform failures end early and say nothing about a normal run.
+        if (stored?.status !== 'passed' && stored?.status !== 'failed') return null;
+        const seconds = (r.at - created.get(r.id)!) / 1000;
+        return seconds > 0 && seconds < STALE_AFTER_MS / 1000 ? seconds : null;
+      }),
+    )
+  )
+    .filter((x): x is number => x !== null)
+    .sort((a, b) => a - b);
+  // 75th percentile: an estimate most submissions finish within.
+  const seconds = samples.length >= 3 ? Math.round(samples[Math.floor(samples.length * 0.75)]) : DEFAULT_TYPICAL_S;
+  typicalCache = { at: Date.now(), seconds };
+  return seconds;
 }
 
 // --- Callback replay protection: one marker per nonce, first write wins

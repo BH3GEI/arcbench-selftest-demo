@@ -75,7 +75,7 @@ export default function HomePage() {
     );
   }
 
-  const recent = subs?.slice(0, 5) ?? null;
+  const recent = subs?.slice(0, 3) ?? null;
 
   return (
     <main id="main" className="wrap">

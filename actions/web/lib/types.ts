@@ -6,6 +6,8 @@ export type TestCaseResult = {
   title: string;
   ok: boolean;
   error: string | null;
+  // Path relative to the grader's results dir (see store.ts getScreenshot).
+  screenshot?: string | null;
 };
 
 // Shape delivered by the grader's scripts/report_back.py callback — kept in
