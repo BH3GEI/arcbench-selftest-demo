@@ -27,6 +27,11 @@ special skill; **Medium** = DoS or needs a second weakness; **Low** = hygiene.
 | F12 | Medium | Server | No cap on expanded size (50 MB deflate zip → many GB on disk). | `SELFTEST_MAX_UNZIPPED_MB` (default 200) on declared sizes; Python's zip reader enforces declared sizes. |
 | F13 | Medium | Server | App images were never removed (janitor only prunes dangling images at startup) → disk fills over time. | Image removed after every evaluation. |
 | F14 | — | Server | Functional bug found while testing: `containers.run(network_aliases=…)` is not a docker-py argument, so `run_app` always failed. | Alias set through `networking_config`. |
+| F15 | Critical | Actions | Open item #4: a single `grade` job held `contents: write` *and* built/ran the untrusted submission — a container escape got a token that could push to this repo. | Split into `prepare` (signature check, holds `SELFTEST_DISPATCH_SIGNING_KEY`, never touches submission content) / `grade` (`contents: read`, holds only `APP_DOWNLOAD_TOKEN`, builds and runs the submission) / `report` (`contents: write`, holds the callback/signing secrets, only ever reads the already-filtered `result.json` artifact). |
+| F16 | High | Actions | Open item #3: the Playwright runner container ran as root, which can only launch Chromium with its own sandbox disabled. | `runner/Dockerfile` now runs the entrypoint as the image's unprivileged `node` user (`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` made world-readable so the browser install from the root build stage is still reachable), so Chromium's namespace sandbox engages without `--no-sandbox` or extra `--cap-add`. The test-pack mount was already scoped to just the current task (never the whole private pack), so this closes the remaining gap rather than relying on scope alone. |
+| F17 | Medium | Actions | Open item #2: `timeout N docker build` only kills the client process — against the legacy builder the daemon keeps building, unbounded, after the client exits. No memory/CPU cap on the build either. | `grade.sh` pins `DOCKER_BUILDKIT=1` (so client-session teardown actually cancels the daemon-side build), adds `--kill-after=10 --signal=TERM`, caps the build with `--memory=2g --memory-swap=2g --cpu-quota=200000 --cpu-period=100000`, and prunes build cache in the cleanup trap. |
+| F18 | Medium | Actions | Open item #7 (partial — grader side): the outbound callback signed only the raw body, so a captured POST could be replayed indefinitely within the signature's lifetime. | `report_back.py` now signs `"{timestamp}.{nonce}.{sha256(body)}"` and sends `X-Timestamp`/`X-Nonce`/`X-Signature`. The grader is stateless across runs, so the nonce-dedup *store* has to live on the receiver (documented in `actions/README_ACTIONS.md` "Callback verification" as a contract for the self-test/web side — not implemented there by this pass). |
+| F19 | — | Actions | New: a download failure, a runner-harness crash, or (by contract) a dispatch stuck in the Actions queue were all indistinguishable from the participant's own app failing — no way for the self-test service to retry fairly or avoid charging quota for an infra hiccup. | Introduced a `status` vocabulary (`passed`/`failed`/`system_error`/`rejected`) through `grade.sh` → `parse_report.py` → `result.json`; `grade.sh` also retries a runner-harness crash (no report produced, not a decided app-fault exit code) once before reporting `system_error`. Contract documented in `actions/README_ACTIONS.md` "Result fields": `system_error` should be retried once and never charged against the daily quota; `rejected` should not be retried. |
 
 ## Open items (larger changes, not done here)
 
@@ -40,30 +45,28 @@ special skill; **Medium** = DoS or needs a second weakness; **Low** = hygiene.
    runner containers (`--runtime=runsc` gVisor, or Kata); if the socket must
    stay, front it with a socket proxy that only allows the build/create/
    start/logs/remove calls; run the API container as non-root.
-2. **Build step has no resource limits and the timeout does not stop it.**
-   `DockerOps.build_image` checks the timeout only when a log line arrives
-   and then just stops reading; the daemon keeps building. No memory/CPU/disk
-   limit on build containers; `FROM` can pull any image, `ADD <url>` is
-   fetched by the daemon even with `--network=none`. Recommendation: build
-   with `docker buildx build` in a subprocess killed on timeout (or a
+2. ~~**Build step has no resource limits and the timeout does not stop
+   it.**~~ Fixed for the Actions channel — see F17. `DockerOps.build_image`
+   on the **server/** (self-hosted docker-compose) channel still has this
+   exact gap (checks the timeout only when a log line arrives, then just
+   stops reading while the daemon keeps building) and remains open there:
+   build with `docker buildx build` in a subprocess killed on timeout (or a
    per-job builder container), pass memory/CPU limits, put Docker's data
    root on a size-limited volume and prune builder cache after each job,
    pre-pull an allowlist of base images and reject other `FROM` lines or
    run the daemon without registry access during builds.
-3. **The runner container holds the whole test pack while its Chromium
-   loads participant-controlled pages.** Playwright runs Chromium as root
-   with the sandbox disabled; a browser exploit gives the participant code
-   execution next to `/pack`, and on the server `/results` is writable and
-   partly returned. Recommendation: run the runner as a non-root user with
-   `chromiumSandbox: true` and a seccomp profile that allows it, keep the
-   Playwright/Chromium pin current, `--read-only` root with tmpfs, and copy
-   only the specs of the current task into the container.
-4. **GITHUB_TOKEN has `contents: write` in the same job that builds and runs
-   untrusted code.** A container escape gets a token that can push to the
-   grader repo (test packs, workflow). Recommendation: split into a `grade`
-   job (`permissions: contents: read`, no callback/download secrets beyond
-   what it needs) and a `report` job (`contents: write`) that only consumes
-   `result.json` via an artifact; pin third-party actions by commit SHA.
+3. ~~**The runner container holds the whole test pack while its Chromium
+   loads participant-controlled pages.**~~ Fixed for the Actions channel —
+   see F16 (non-root runner, sandbox engaged; the mount was already scoped
+   to the current task only). The **server/** channel's runner still
+   launches Chromium as root; apply the same non-root fix there, plus
+   `--read-only` root with tmpfs and a current Playwright/Chromium pin.
+4. ~~**GITHUB_TOKEN has `contents: write` in the same job that builds and
+   runs untrusted code.**~~ Fixed — see F15 (`prepare`/`grade`/`report`
+   split). Third-party actions (`actions/checkout`, `actions/upload-` /
+   `download-artifact`) are still pinned by tag, not commit SHA — low
+   severity (official GitHub-authored actions) but worth doing before a
+   real production launch.
 
 ### Medium
 
@@ -79,10 +82,14 @@ special skill; **Medium** = DoS or needs a second weakness; **Low** = hygiene.
    maintainers via a separate private repo; keep the grader repo free of
    outside collaborators.
 7. **Callback trust.** `CALLBACK_TOKEN` is sent to whatever `callback_url`
-   the dispatch carries (now https-only). Recommendation: take the callback
-   URL from a repo variable, not the payload; on the intake side compare the
-   token in constant time, accept each `submission_id` once and only if it
-   was dispatched by the service (stops forged or replayed results).
+   the dispatch carries (now https-only). Partially fixed — see F18: the
+   outbound POST now carries a timestamp+nonce HMAC
+   (`X-Timestamp`/`X-Nonce`/`X-Signature`), so forging or replaying it needs
+   the shared signing key either way. Still open: the *receiver* (self-test
+   service / `actions/web`) needs to actually verify those three headers and
+   persist seen nonces — not implemented in this repo, since the grader is
+   stateless across runs; take the callback URL from a repo variable rather
+   than the payload once that lands.
 8. **Token in query string** (`?token=` for screenshots/logs) ends up in
    access logs, browser history and Referer. Recommendation: short-lived
    signed URLs per artifact, or an HttpOnly SameSite cookie session.

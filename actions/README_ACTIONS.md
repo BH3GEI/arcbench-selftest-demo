@@ -31,29 +31,48 @@ self-test service: existing quota check (server/app/quota.py, unchanged)
         |  { event_type: "grade-submission",
         |    client_payload: { submission_id, task_id, download_url, callback_url? } }
         v
-private grader repo: .github/workflows/grade.yml
-        |
+private grader repo: .github/workflows/grade.yml — THREE jobs, each holding
+only the secrets/permissions it needs (see "Secrets & least privilege"):
+
+  prepare (contents: read, holds SELFTEST_DISPATCH_SIGNING_KEY)
+        +-- validate/normalize every untrusted input
+        +-- verify the dispatch's HMAC signature (scripts/verify_signature.py)
+        |   — never checks out or runs anything derived from the submission,
+        |   so holding the signing key here is safe
+        v
+  grade (contents: read, holds ONLY APP_DOWNLOAD_TOKEN) — builds and runs
+  the fully untrusted submission; no write access, no callback/signing
+  secrets, so a container escape here can't push to this repo or forge a
+  result
         +-- download app.zip, validate (Dockerfile present, no path escapes,
         |   size/file-count caps)
-        +-- docker build --network=none         (app image, isolated build)
+        +-- docker build --network=none, resource-capped, really killed on
+        |   timeout                               (app image, isolated build)
         +-- docker network create --internal    (no outbound internet)
         +-- docker run app container            (network alias "app")
         +-- docker build runner image (or docker pull a prebuilt one)
-        +-- docker run runner container on the SAME internal network,
-        |   BASE_URL=http://app:<port> — this is the only thing it can reach.
-        |   Only now is the task's tests/ directory mounted (read-only) into
-        |   this container. The app container never sees it; the runner
-        |   container never sees the app's source.
-        +-- parse report.json, apply the task's visibility setting
-        +-- report back (callback URL, or a private GitHub Release in the
-        |   grader repo — never the Actions log)
-        +-- cleanup (containers, network, image) via a trap, always runs
+        +-- docker run runner container, non-root, on the SAME internal
+        |   network, BASE_URL=http://app:<port> — the only thing it can
+        |   reach. Only now is the task's tests/ directory mounted
+        |   (read-only) into this container. The app container never sees
+        |   it; the runner container never sees the app's source.
+        +-- parse report.json, apply the task's visibility setting ->
+        |   result.json (status is one of passed/failed/system_error/
+        |   rejected — see "Result fields")
+        +-- cleanup (containers, network, image, build cache) via a trap,
+        |   always runs
+        +-- upload result.json as a build artifact for the next job
+        v
+  report (contents: write, holds SELFTEST_CALLBACK_TOKEN +
+  SELFTEST_DISPATCH_SIGNING_KEY) — runs even if `grade` failed/timed out
+        +-- download the result.json artifact (synthesize a system_error
+        |   one if `grade` produced none at all)
+        +-- report back (signed callback URL, or a private GitHub Release
+            in the grader repo — never the Actions log)
 ```
 
-Every step after "download" runs inside the single Actions job; nothing is
-streamed to the job's public-within-the-repo log except high-level step
-names. `docker run` output for the app and the Playwright pack is redirected
-to files and only read back by `parse_report.py`, never printed.
+`docker run` output for the app and the Playwright pack is redirected to
+files and only read back by `parse_report.py`, never printed to the job log.
 
 ## Setting up the private grader repo
 
@@ -290,11 +309,74 @@ self-test service's own credential, but the grader checks anyway
   server-side. The grader deliberately does not re-implement a stateful
   per-team counter — that logic (and its storage) stays exactly where it
   already is, in `server/app/quota.py`, which both channels share.
-- The same key signs the outbound callback too (`X-Signature: sha256=...`
-  header on the `CALLBACK_URL` POST, in `report_back.py`), so the self-test
-  service can confirm a result actually came from this grader.
+- The same key signs the outbound callback too, in `report_back.py` — see
+  "Callback verification" below for the exact header contract.
 - No key configured → the check no-ops (always passes). That's intentional
   for local `workflow_dispatch` testing; set the secret before going live.
+
+## Callback verification
+
+`report_back.py` POSTs `result.json` to `CALLBACK_URL` with three headers,
+signed together so none can be stripped or reused independently:
+
+- `X-Timestamp` — unix seconds when the grader sent the callback.
+- `X-Nonce` — 32 hex chars, random per callback.
+- `X-Signature: sha256=<hex>` — HMAC-SHA256 over
+  `"{X-Timestamp}.{X-Nonce}.{sha256-hex(body)}"` using the shared
+  `SELFTEST_DISPATCH_SIGNING_KEY`.
+
+The receiver (self-test service / `actions/web/api/callback`) should, in
+order: (1) recompute the signature over the same three-part string and
+reject on mismatch — this is the anti-forgery check; (2) reject if
+`X-Timestamp` is more than ~300s old — anti-replay for anything older than
+the window; (3) reject if `X-Nonce` was already seen for this
+`submission_id` within that window — anti-replay for a byte-for-byte resend
+*inside* the window, which (1)+(2) alone would still accept. (3) needs a
+small persisted set of recently-seen nonces (a few minutes' TTL is enough);
+the grader itself is stateless across runs and can't do this dedup, so it
+has to live on the receiving side — same place quota state already lives
+(`server/app/quota.py` / the web app's Blob store), not in this repo.
+
+## Result fields
+
+`result.json` — the shape both the callback POST and the fallback GitHub
+Release asset carry — always has:
+
+```
+{
+  "submission_id": "...", "task_id": "...", "visibility": "public|hidden",
+  "status": "passed|failed|system_error|rejected",
+  "passed": 0, "total": 0, "detail": "...",
+  "tests": [...]   // visibility: public and status reached "scored" only
+}
+```
+
+`status` distinguishes **who it counts against**:
+
+- `passed` / `failed` — a real, participant-attributable result: the app
+  built and started, the test pack ran to completion, and either every test
+  passed or `detail`/`tests` says which didn't (or, for `failed` without a
+  report, *why* nothing ran — bad zip, no Dockerfile, build failed, the app
+  never became ready, or the run itself timed out). Counts against the
+  daily quota like any other graded submission.
+- `system_error` — an infra fault, not the participant's: the download
+  failed (after retries) or the Playwright harness crashed before producing
+  a report (also retried once automatically inside `grade.sh` before this
+  status is reported). The caller should **retry the dispatch once and must
+  not charge the daily quota** for this result. This also covers a case the
+  grader can't see from inside the job at all: if `repository_dispatch`
+  itself sits queued longer than the self-test service is willing to wait
+  (busy runners), the service should treat that timeout the same way —
+  system_error, retry once, no quota charge — on its own side, since no
+  grader code ever ran to report anything.
+- `rejected` — the dispatch didn't authenticate (bad/missing/stale HMAC
+  signature) or named an unknown `task_id`. Not a real submission at all;
+  retrying won't help without fixing the caller, so don't auto-retry this
+  one and don't charge quota either.
+
+This status vocabulary and the retry/quota rule are the contract; rendering
+it for participants (a "we hit a glitch, retrying" vs. a real failure
+message) is the web app's job, not this repo's.
 
 ## Concurrency, resource limits & retries
 
@@ -310,22 +392,42 @@ self-test service's own credential, but the grader checks anyway
   from `requirements.yaml` (defaults 600/60/900s), plus a job-level
   `timeout-minutes: 20` backstop in `grade.yml` in case something hangs
   outside those three checkpoints.
+- **Build termination is real, not cosmetic**: a plain `timeout N docker
+  build` only kills the *client* process — against the legacy (non-BuildKit)
+  builder the daemon-side build keeps running and consuming CPU/RAM/disk
+  indefinitely (docs/security-review.md open item #2). `grade.sh` pins
+  `DOCKER_BUILDKIT=1` explicitly (BuildKit cancels the daemon-side build when
+  the client's session is torn down), adds `--kill-after=10 --signal=TERM`
+  so a client that ignores SIGTERM gets SIGKILLed, and caps the build itself
+  with `--memory=2g --memory-swap=2g --cpu-quota=200000 --cpu-period=100000`
+  as defense in depth. The cleanup trap also runs `docker builder prune -f`
+  so a killed build's cache doesn't accumulate on the runner.
 - **Resource caps**: app container — 512MB memory (swap capped equal, so it
   can't page around the limit), 1 CPU, 256 pids, read-only root fs with a
   64MB noexec `/tmp`, `no-new-privileges`, a handful of Linux capabilities
   dropped, log output capped (`--log-opt max-size=10m --log-opt max-file=1`).
-  Runner container — 2GB memory, 2 CPUs, 1024 pids, `no-new-privileges`.
+  Runner container — 2GB memory, 2 CPUs, 1024 pids, `no-new-privileges`, and
+  (see `runner/Dockerfile`) runs as the image's unprivileged `node` user so
+  Chromium's own namespace sandbox actually engages instead of needing
+  `--no-sandbox` — the test pack mount is already scoped to just the current
+  task's `tests/` (never the whole private task pack), so a browser exploit
+  in this container still can't reach any other task's content either way.
 - **Download caps**: HTTPS only (`--proto =https`), 100MB max file size,
   120s max transfer time — a hostile or broken `download_url` can't fill the
   job's disk or hang it indefinitely.
-- **Retries**: only for infra calls that have nothing to do with the
-  submission's own correctness — downloading the app zip, pulling a
-  prebuilt `GRADER_RUNNER_IMAGE` (3 attempts, 5s apart). Building the
-  submitted app and running its tests are never retried: a flaky network
-  shouldn't get 3 tries disguised as 1, and a genuinely broken submission
-  shouldn't get extra attempts either. If a run fails on infra flakiness,
-  the self-test service re-dispatches (same `submission_id` → same lane, so
-  no pile-up).
+- **Retries**: infra calls get one automatic retry inside the same job
+  before anything is reported back — downloading the app zip and pulling a
+  prebuilt `GRADER_RUNNER_IMAGE` (3 attempts, 5s apart, unchanged), and now
+  also the Playwright runner itself: if it crashes before producing
+  `report.json` for a reason that isn't "app never became ready" or "run
+  timed out" (both decided, participant-attributable outcomes), `grade.sh`
+  reruns the runner container once more against the same already-built app
+  before giving up with `status=system_error`. Building the submitted app
+  and actually running its tests to a decided outcome are never retried: a
+  flaky network shouldn't get 3 tries disguised as 1, and a genuinely broken
+  submission shouldn't get extra attempts either. If a `system_error` makes
+  it all the way to the callback, the self-test service should re-dispatch
+  once more itself and not charge quota for it — see "Result fields".
 - **Cleanup**: a `trap cleanup EXIT` in `grade.sh` always removes the app
   container, runner container, network and app image by name — runs even on
   early failure. Debug artifacts (`.gradework/results`, build/app/runner
@@ -344,22 +446,54 @@ self-test service's own credential, but the grader checks anyway
   zips are stored**, nothing else. Do not reuse a personal PAT with full
   `repo` scope here (the verification run for this template used one for
   convenience, documented in "Verified run" below — don't copy that part).
+  If zips are downloaded from this repo itself (as in this template's own
+  test runs, via `raw.githubusercontent.com`), replace it the same way as
+  `GRADER_SERVICE_TOKEN` above but with **`Contents: Read-only`** (this
+  token lives in the `grade` job, which runs fully untrusted code — it
+  should never be able to write anything even if that job is compromised).
   A fine-grained PAT scoped to just the storage location/repo, or a signed
-  URL from object storage, is the production shape.
-- The self-test service's own dispatch credential needs exactly: write
-  access to the grader repo (to call the `dispatches` API) — nothing else.
-  A GitHub App installed only on the grader repo, or a fine-grained PAT
-  scoped to that one repo, both work; a classic PAT with org-wide `repo`
-  scope is more than necessary.
+  URL from object storage, is the production shape; a signed URL needs no
+  token here at all (the strictly least-privilege option, since nothing
+  long-lived is exposed to the `grade` job's environment).
+- The self-test service's own dispatch credential (`GRADER_SERVICE_TOKEN` in
+  `actions/web`'s env — see "Web app" above) needs exactly: write access to
+  the grader repo, to call the `dispatches` API and list the `tasks/`
+  directory — nothing else. It currently reuses a broad personal token; swap
+  it for a fine-grained PAT scoped to just the grader repo:
+  1. On github.com, sign in as the account that owns/administers the grader
+     repo, go to `https://github.com/settings/personal-access-tokens/new`.
+  2. **Resource owner**: that account. **Repository access**: "Only select
+     repositories" -> the grader repo only (e.g.
+     `BH3GEI/arcbench-grader-demo`) — never "All repositories".
+  3. **Permissions -> Repository permissions**: `Contents: Read and write`
+     (needed for the `dispatches` API and for listing `tasks/`). Leave
+     everything else "No access".
+  4. Set an expiration (90 days, or your org's policy), generate, copy the
+     token value once (GitHub never shows it again).
+  5. Set it as `GRADER_SERVICE_TOKEN` in the `actions/web` Vercel project's
+     env vars (replacing the old broad personal token), then redeploy.
+  6. Revoke the old personal token once the new one is confirmed working —
+     `https://github.com/settings/tokens`.
+  A GitHub App installed only on the grader repo is an equally valid
+  alternative to a fine-grained PAT here.
 - `GITHUB_TOKEN` (the job's own, automatic, never a stored secret): scoped
-  per job in `grade.yml` — `prepare` gets `contents: read` (it doesn't even
-  check out the repo), `grade` gets `contents: write` (needed only for the
-  fallback Release). Neither job gets `actions:`, `issues:`, `packages:`, or
-  anything else — GitHub denies every permission not explicitly listed once
-  you specify a `permissions:` map.
-- Both `checkout@v4` steps set `persist-credentials: false` so the job token
-  never sits in `.git/config` on disk, where the process tree building an
-  untrusted submission could otherwise reach it.
+  per job in `grade.yml` — `prepare` and `grade` both get `contents: read`;
+  only `report` gets `contents: write` (needed for the fallback Release),
+  and `report` never builds or runs anything derived from the submission.
+  No job gets `actions:`, `issues:`, `packages:`, or anything else — GitHub
+  denies every permission not explicitly listed once you specify a
+  `permissions:` map.
+- Secret exposure is scoped to match: `prepare` holds only
+  `SELFTEST_DISPATCH_SIGNING_KEY` (used before anything untrusted is
+  touched); `grade` — the job that builds and runs the submission — holds
+  only `APP_DOWNLOAD_TOKEN`; `report` holds `SELFTEST_CALLBACK_TOKEN` and
+  `SELFTEST_DISPATCH_SIGNING_KEY` (to sign the outbound callback) but never
+  sees the submission's code. A full container escape in `grade` therefore
+  cannot push to this repo, forge a signed callback, or read the dispatch
+  signing key.
+- All three `checkout@v4` steps set `persist-credentials: false` so the job
+  token never sits in `.git/config` on disk, where the process tree building
+  an untrusted submission could otherwise reach it.
 
 ## Cost / usage estimate
 
@@ -452,14 +586,18 @@ service (already true via the existing daily quota).
 
 **出故障怎么处理**
 
-- `detail` 是 infra 类报错（`download failed` / `app did not become ready
-  within Ns` / `runner exited N without a report` / `app build failed or
-  exceeded Ns`）→ 先下载该 run 的 `debug-<submission_id>` artifact（保留 3
-  天），看 `build.log` / `app.log` / `runner.log`；多数是选手 app 本身的问
-  题，不是 grader 的 bug。
-- `detail` 以 `dispatch rejected:` 开头 → 签名或新鲜度问题。先确认自测服务
-  与 grader 仓库两侧 `SELFTEST_DISPATCH_SIGNING_KEY` 是否一致，再检查服务端
-  签名时间戳是否有明显时钟偏移（默认容忍窗口 300 秒，见
+- 先看 `result.json` 的 `status` 分流：`failed` 才是选手 app 自己的问题
+  （`detail` 形如 `app did not become ready within Ns` / `app build failed
+  or exceeded Ns` / `N/total tests failed`）；`system_error` 是评测系统基
+  础设施的问题（`download failed` / `runner exited N without a report
+  after N attempt(s)`，后者已经在 `grade.sh` 里自动重试过一次才报出来）——
+  自测服务侧应对 `system_error` 重试一次且不计入当日配额，不要当成选手的
+  锅去找选手。两者都先下载该 run 的 `debug-<submission_id>` artifact（保留
+  3 天），看 `build.log` / `app.log` / `runner.log` 定位。
+- `status` 是 `rejected`（`detail` 以 `dispatch rejected:` 开头，或
+  `unknown task_id:`）→ 这不是一次真实提交，不要重试。签名问题先确认自测
+  服务与 grader 仓库两侧 `SELFTEST_DISPATCH_SIGNING_KEY` 是否一致，再检查
+  服务端签名时间戳是否有明显时钟偏移（默认容忍窗口 300 秒，见
   `scripts/verify_signature.py` 的 `--max-age-s`）。
 - 整体吞吐变慢、submission 排队明显 → 检查是不是同一个 `submission_id` 被
   重复 dispatch（会一直排在同一 lane 里串行），或是已经顶到组织的 Actions
