@@ -124,6 +124,35 @@ function Score({ s, hidden }: { s: Submission; hidden: boolean }) {
   );
 }
 
+function Screenshot({ src, alt }: { src: string; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  if (failed) {
+    return (
+      <span className="shot-broken">
+        <span>截图加载失败，可能是网络连接异常</span>
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => {
+            setFailed(false);
+            setAttempt((n) => n + 1);
+          }}
+        >
+          重试
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <a href={src} target="_blank" rel="noreferrer">
+      <img key={attempt} src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />
+    </a>
+  );
+}
+
 function TestRow({ t }: { t: TestExtra }) {
   const shots = [...(t.screenshots ?? []), ...(t.screenshot ? [t.screenshot] : [])];
   const hasBody = Boolean((!t.ok && t.error) || shots.length);
@@ -158,9 +187,7 @@ function TestRow({ t }: { t: TestExtra }) {
         )}
         {shots.length > 0 && <span className="label">截图</span>}
         {shots.map((src, i) => (
-          <a key={i} href={src} target="_blank" rel="noreferrer">
-            <img src={src} alt={`测试「${t.title}」截图 ${i + 1}`} loading="lazy" />
-          </a>
+          <Screenshot key={i} src={src} alt={`测试「${t.title}」截图 ${i + 1}`} />
         ))}
       </div>
     </details>

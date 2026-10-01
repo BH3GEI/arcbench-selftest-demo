@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Providers } from './providers';
-import { SiteFooter, SiteHeader } from './_ui';
+import { OfflineNotice, SiteFooter, SiteHeader } from './_ui';
 import './globals.css';
 
 export const metadata = {
@@ -16,8 +16,12 @@ export const viewport = {
   ],
 };
 
-// 默认暗色（与比赛平台一致）；在首帧前应用用户选择的亮色，避免闪烁。
-const themeInit = `try{if(localStorage.getItem('theme')==='light')document.documentElement.dataset.theme='light'}catch(e){}`;
+// 有用户手动选择时以它为准；否则首次访问跟随系统亮/暗偏好。在首帧前执行，避免闪烁。
+const themeInit = `try{
+  var t=localStorage.getItem('theme');
+  if(t==='light')document.documentElement.dataset.theme='light';
+  else if(t!=='dark'&&window.matchMedia('(prefers-color-scheme: light)').matches)document.documentElement.dataset.theme='light';
+}catch(e){}`;
 
 // 与比赛平台相同的字体。
 const FONTS =
@@ -38,6 +42,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         </a>
         <Providers>
           <SiteHeader />
+          <OfflineNotice />
           {children}
           <SiteFooter />
         </Providers>

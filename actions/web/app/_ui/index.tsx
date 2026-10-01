@@ -146,7 +146,13 @@ export function ThemeToggle() {
   }
 
   return (
-    <button type="button" className="btn btn-sm btn-text" onClick={toggle} aria-pressed={light} aria-label="亮色模式">
+    <button
+      type="button"
+      className="btn btn-sm btn-text"
+      onClick={toggle}
+      aria-pressed={light}
+      aria-label={light ? '切换到暗色模式' : '切换到亮色模式'}
+    >
       {light ? '暗色' : '亮色'}
     </button>
   );
@@ -190,13 +196,46 @@ export function SiteHeader() {
         {session && (
           <span className="user">
             <span className="uname">{session.user?.name}</span>
-            <button type="button" className="btn btn-sm" onClick={() => signOut({ callbackUrl: '/' })}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              aria-label={session.user?.name ? `退出 ${session.user.name}` : '退出'}
+              onClick={() => signOut({ callbackUrl: '/' })}
+            >
               退出
             </button>
           </span>
         )}
       </div>
     </header>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* offline notice                                                      */
+/* ------------------------------------------------------------------ */
+
+/** 断网/弱网时提示当前数据可能来自缓存，不打断阅读。 */
+export function OfflineNotice() {
+  const [offline, setOffline] = useState(false);
+
+  useEffect(() => {
+    setOffline(typeof navigator !== 'undefined' && !navigator.onLine);
+    const goOnline = () => setOffline(false);
+    const goOffline = () => setOffline(true);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
+
+  if (!offline) return null;
+  return (
+    <div className="offline-notice" role="status" aria-live="polite">
+      网络连接异常，当前显示的数据可能不是最新。
+    </div>
   );
 }
 
@@ -217,6 +256,8 @@ export function SiteFooter() {
 /* building blocks                                                     */
 /* ------------------------------------------------------------------ */
 
+const SITE_NAME = 'ArcBench 自测';
+
 export function PageHead({
   kicker,
   title,
@@ -228,6 +269,11 @@ export function PageHead({
   lead?: ReactNode;
   children?: ReactNode;
 }) {
+  useEffect(() => {
+    if (typeof title !== 'string' || !title) return;
+    document.title = title === SITE_NAME ? SITE_NAME : `${title} · ${SITE_NAME}`;
+  }, [title]);
+
   return (
     <div className="page-head">
       <div className="kicker">{kicker}</div>

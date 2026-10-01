@@ -27,7 +27,32 @@
     failed: { label: '未全部通过', tone: 'pill-danger' },
     error: { label: '运行失败', tone: 'pill-danger' },
     system_error: { label: '系统错误 · 不计次数', tone: 'pill-warning' },
+    not_run: { label: '未能运行', tone: 'pill-danger' },
   };
+
+  var SITE_NAME = 'ArcBench 自测';
+  function setTitle(title) {
+    document.title = !title || title === SITE_NAME ? SITE_NAME : title + ' · ' + SITE_NAME;
+  }
+
+  // 评测机返回的英文原因 -> 选手能看懂的中文说明。Keep in sync with
+  // actions/web/app/_ui/index.tsx's FAILURE_ZH/failureReason.
+  var FAILURE_ZH = [
+    [/zip failed validation/i, 'zip 包未通过安全检查',
+      'zip 中含有不允许的路径（如 ../ 或绝对路径）、解压后体积过大或文件数过多。请在 app 根目录下重新打包后再提交。'],
+    [/no Dockerfile/i, 'zip 根目录缺少 Dockerfile',
+      'Dockerfile 需要位于 zip 的根目录，不能放在子文件夹里。打包时请选中 app 目录内的文件，而不是外层文件夹。'],
+    [/build exceeded/i, '镜像构建超时', '构建时间超过上限。请精简构建步骤，构建过程中无法访问外网。'],
+    [/app build failed/i, '镜像构建失败', '请先在本地运行 docker build 确认能构建成功。构建过程中无法访问外网。'],
+    [/did not become ready/i, 'app 未能在限定时间内启动', '请检查启动命令，并确认 app 监听 PORT 环境变量指定的端口。'],
+    [/test run exceeded/i, '测试运行超时', '测试整体运行时间超过上限。'],
+  ];
+  function failureReason(detail) {
+    for (var i = 0; i < FAILURE_ZH.length; i++) if (FAILURE_ZH[i][0].test(detail || '')) {
+      return { title: FAILURE_ZH[i][1], hint: FAILURE_ZH[i][2] };
+    }
+    return { title: 'app 未能运行', hint: '镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。' };
+  }
 
   var ERROR_ZH = [
     [/daily submission limit/i, '今日自测次数已用完，UTC 0:00 重置。'],
@@ -55,6 +80,8 @@
     if (st === 'rejected') return 'system_error';
     var detail = (s.result && s.result.detail) || '';
     if (st === 'error' && /could not start grading|system[_ ]error/i.test(detail)) return 'system_error';
+    // app 镜像构建/启动失败、0 条测试执行：与"测试跑了但没全过"区分开，避免误导。
+    if ((st === 'error' || st === 'failed') && s.result && s.result.total === 0) return 'not_run';
     return st;
   }
   function isPending(st) { return st === 'queued' || st === 'running'; }
@@ -198,11 +225,12 @@
       }).join('') + '</nav>';
     }
     html += '<span class="spacer"></span>' +
-      '<button type="button" class="btn btn-sm btn-text" id="theme-toggle" aria-pressed="' + light + '" aria-label="亮色模式">' +
+      '<button type="button" class="btn btn-sm btn-text" id="theme-toggle" aria-pressed="' + light + '" aria-label="' +
+      (light ? '切换到暗色模式' : '切换到亮色模式') + '">' +
       (light ? '暗色' : '亮色') + '</button>';
     if (session) {
       html += '<span class="user"><span class="uname">' + esc(session.login) + '</span>' +
-        '<a href="/auth/logout" class="btn btn-sm">退出</a></span>';
+        '<a href="/auth/logout" class="btn btn-sm" aria-label="退出 ' + esc(session.login) + '">退出</a></span>';
     }
     html += '</div>';
     var el = document.getElementById('site-header');
@@ -216,6 +244,14 @@
     else delete document.documentElement.dataset.theme;
     try { localStorage.setItem('theme', next ? 'light' : 'dark'); } catch (e) {}
     renderHeader();
+  }
+
+  function renderOfflineNotice() {
+    var el = document.getElementById('offline-notice');
+    if (!el) return;
+    el.innerHTML = navigator.onLine
+      ? ''
+      : '<div class="offline-notice" role="status" aria-live="polite">网络连接异常，当前显示的数据可能不是最新。</div>';
   }
 
   function renderFooter() {
@@ -266,6 +302,7 @@
 
   function requireAuth(render) {
     if (session) return render();
+    setTitle('需要登录');
     main().innerHTML = pageHeadHtml('自测', '需要登录', '登录后可提交自测并查看本人的提交记录。', signInButtonHtml(false));
   }
   function main() { return document.getElementById('main'); }
@@ -274,6 +311,7 @@
   /* ------------------------------------------------------------- 首页 */
 
   function renderHome() {
+    setTitle('ArcBench 自测');
     if (!session) {
       main().innerHTML =
         pageHeadHtml('自测通道', 'ArcBench 自测',
@@ -322,6 +360,7 @@
 
   function renderTasks() {
     requireAuth(function () {
+      setTitle('选择题目');
       main().innerHTML = pageHeadHtml('提交', '选择题目', '选择要自测的题目，下一步上传 zip。') +
         '<section class="section" aria-labelledby="list"><h2 id="list" class="sr-only">题目列表</h2>' +
         '<div id="tasks-body"><div class="skeleton" style="height:160px"></div></div></section>';
@@ -361,6 +400,7 @@
   function renderSubmit(taskId) {
     requireAuth(function () {
       var file = null, busy = false;
+      setTitle(taskDisplayName(taskId));
       main().innerHTML = pageHeadHtml(
         '<a href="#/tasks">提交</a> / 上传', taskDisplayName(taskId),
         '上传后，系统在正式评测环境中构建镜像并运行本题测试。',
@@ -470,6 +510,7 @@
 
   function renderSubmissions() {
     requireAuth(function () {
+      setTitle('提交记录');
       main().innerHTML = pageHeadHtml('历史记录', '提交记录', '本人全部自测提交。',
         '<a href="#/tasks" class="btn btn-primary">提交自测</a>') +
         '<section class="section" aria-labelledby="list"><h2 id="list" class="sr-only">提交列表</h2>' +
@@ -520,6 +561,7 @@
 
   function renderSubmissionDetail(id) {
     requireAuth(function () {
+      setTitle('结果');
       main().setAttribute('aria-busy', 'true');
       main().innerHTML = '<div class="page-head"><div class="skeleton" style="height:14px;width:120px"></div>' +
         '<div class="skeleton" style="height:56px;width:320px;margin-top:24px"></div></div>' +
@@ -545,6 +587,7 @@
       var r = s.result;
       var hidden = Boolean(r && (r.visibility === 'hidden' || !r.tests));
       var resubmit = '#/submit/' + encodeURIComponent(s.taskId);
+      setTitle(taskDisplayName(s.taskId) + ' 结果');
 
       var html = pageHeadHtml(
         '<a href="#/submissions">历史记录</a> / 结果', taskDisplayName(s.taskId), null,
@@ -564,10 +607,12 @@
           '<div><a href="' + resubmit + '" class="btn btn-primary">重新提交</a></div></section>';
       }
 
-      if ((st === 'error' || st === 'failed') && r && r.total === 0) {
+      if (st === 'not_run' && r) {
+        var reason = failureReason(r.detail);
         html += '<section class="section stack">' +
-          noticeHtml('danger', 'app 未能启动', '镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。') +
-          (r.detail ? '<pre>' + esc(r.detail) + '</pre>' : '') + '</section>';
+          noticeHtml('danger', reason.title, esc(reason.hint) + ' 本次计入当日次数。') +
+          (r.detail ? '<pre>' + esc(r.detail) + '</pre>' : '') +
+          '<div><a href="' + resubmit + '" class="btn btn-primary">修改后重新提交</a></div></section>';
       }
 
       if (r && !isPending(st) && st !== 'system_error' && r.total > 0) html += scoreHtml(s, hidden);
@@ -636,10 +681,46 @@
         (shots.length ? '<span class="label">截图</span>' : '') +
         shots.map(function (src, i) {
           var url = '/api/submissions/' + id + '/artifact?path=' + encodeURIComponent(src);
-          return '<a href="' + url + '" target="_blank" rel="noreferrer"><img src="' + url + '" alt="测试「' + esc(t.title) + '」截图 ' + (i + 1) + '" loading="lazy"></a>';
+          var alt = '测试「' + t.title + '」截图 ' + (i + 1);
+          return '<span class="shot" data-src="' + esc(url) + '" data-alt="' + esc(alt) + '"></span>';
         }).join('');
       return '<details class="test"><summary>' + head + '<span class="toggle" aria-hidden="true"></span></summary>' +
         '<div class="test-body">' + body + '</div></details>';
+    }
+
+    function mountShot(container) {
+      var src = container.getAttribute('data-src');
+      var alt = container.getAttribute('data-alt');
+      function showImage() {
+        container.innerHTML = '';
+        var a = document.createElement('a');
+        a.href = src;
+        a.target = '_blank';
+        a.rel = 'noreferrer';
+        var img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = alt;
+        img.onerror = showBroken;
+        img.src = src;
+        a.appendChild(img);
+        container.appendChild(a);
+      }
+      function showBroken() {
+        container.innerHTML = '';
+        var span = document.createElement('span');
+        span.className = 'shot-broken';
+        var text = document.createElement('span');
+        text.textContent = '截图加载失败，可能是网络连接异常';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm';
+        btn.textContent = '重试';
+        btn.onclick = showImage;
+        span.appendChild(text);
+        span.appendChild(btn);
+        container.appendChild(span);
+      }
+      showImage();
     }
 
     function wireTests(tests) {
@@ -661,6 +742,7 @@
         rows.innerHTML = shown.length === 0
           ? '<p class="empty">' + (filter === 'fail' ? '没有未通过的测试。' : '无测试。') + '</p>'
           : shown.map(testRowHtml).join('');
+        Array.prototype.forEach.call(rows.querySelectorAll('.shot'), mountShot);
       }
       renderTabs();
       renderRows();
@@ -679,16 +761,19 @@
     else if ((m = path.match(/^\/submit\/(.+)$/))) renderSubmit(decodeURIComponent(m[1]));
     else if (path === '/submissions') renderSubmissions();
     else if ((m = path.match(/^\/submissions\/([^/]+)$/))) renderSubmissionDetail(m[1]);
-    else main().innerHTML = pageHeadHtml('', '页面不存在', '请从导航重新开始。');
+    else { setTitle('页面不存在'); main().innerHTML = pageHeadHtml('', '页面不存在', '请从导航重新开始。'); }
     main().focus && main();
   }
 
   window.addEventListener('hashchange', render);
+  window.addEventListener('online', renderOfflineNotice);
+  window.addEventListener('offline', renderOfflineNotice);
 
   getMe().then(function (me) {
     session = me && !me.error ? me : null;
   }).catch(function () { session = null; }).then(function () {
     renderFooter();
+    renderOfflineNotice();
     render();
   });
 })();

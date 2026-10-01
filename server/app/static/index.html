@@ -7,8 +7,12 @@
 <title>ArcBench 自测</title>
 <meta name="description" content="在正式评测环境中运行题目测试并查看结果。自测结果不计入正式成绩。">
 <script>
-// 默认暗色（与比赛平台一致）；在首帧前应用用户选择的亮色，避免闪烁。
-try{if(localStorage.getItem('theme')==='light')document.documentElement.dataset.theme='light'}catch(e){}
+// 有用户手动选择时以它为准；否则首次访问跟随系统亮/暗偏好。在首帧前执行，避免闪烁。
+try{
+  var t=localStorage.getItem('theme');
+  if(t==='light')document.documentElement.dataset.theme='light';
+  else if(t!=='dark'&&window.matchMedia('(prefers-color-scheme: light)').matches)document.documentElement.dataset.theme='light';
+}catch(e){}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -18,6 +22,7 @@ try{if(localStorage.getItem('theme')==='light')document.documentElement.dataset.
 <body>
 <a class="skip-link" href="#main">跳到正文</a>
 <header class="site-header" id="site-header"></header>
+<div id="offline-notice"></div>
 <main id="main" class="wrap"></main>
 <footer class="site-footer" id="site-footer"></footer>
 <script src="/static/app.js"></script>
