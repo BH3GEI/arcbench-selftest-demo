@@ -78,11 +78,23 @@ def dig(d: dict, *path, default=None):
     return cur
 
 
-def load_arcbench_requirements(src: Path) -> dict:
-    req_path = src / "requirements" / "requirements.yaml"
-    if not req_path.is_file():
-        print(f"error: no requirements/requirements.yaml under {src}", file=sys.stderr)
-        sys.exit(2)
+def find_requirements_base(src: Path) -> tuple[Path, Path]:
+    """Arcbench task folders come in two shapes in the wild: nested
+    (requirements/requirements.yaml, requirements/reference/, ...) and flat
+    (requirements.yaml, reference/, ... all directly under the task folder).
+    Returns (requirements.yaml path, base dir to look for md/reference/assets in).
+    """
+    nested = src / "requirements" / "requirements.yaml"
+    if nested.is_file():
+        return nested, src / "requirements"
+    flat = src / "requirements.yaml"
+    if flat.is_file():
+        return flat, src
+    print(f"error: no requirements.yaml under {src} (looked in requirements/ and the task root)", file=sys.stderr)
+    sys.exit(2)
+
+
+def load_arcbench_requirements(req_path: Path) -> dict:
     with open(req_path) as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
@@ -172,7 +184,8 @@ def main() -> int:
     repo_root = find_repo_root(args.dest_repo)
     guard_not_public_repo(repo_root)
 
-    arcbench_req = load_arcbench_requirements(src)
+    req_path, req_base = find_requirements_base(src)
+    arcbench_req = load_arcbench_requirements(req_path)
     fields = derive_fields(arcbench_req, task_id_hint=args.task_id or src.name)
     if args.task_id:
         fields["task_id"] = args.task_id
@@ -197,14 +210,14 @@ def main() -> int:
         return 2
 
     (task_dir / "requirements").mkdir(parents=True, exist_ok=True)
-    write_flat_requirements(task_dir / "requirements" / "requirements.yaml", fields, src / "requirements" / "requirements.yaml")
+    write_flat_requirements(task_dir / "requirements" / "requirements.yaml", fields, req_path)
 
-    md_src = src / "requirements" / "requirements.md"
+    md_src = req_base / "requirements.md"
     if md_src.is_file():
         shutil.copy2(md_src, task_dir / "requirements" / "requirements.md")
 
-    copy_tree_if_present(src / "requirements" / "reference", task_dir / "requirements" / "reference")
-    copy_tree_if_present(src / "requirements" / "assets", task_dir / "requirements" / "assets")
+    copy_tree_if_present(req_base / "reference", task_dir / "requirements" / "reference")
+    copy_tree_if_present(req_base / "assets", task_dir / "requirements" / "assets")
     copy_tree_if_present(tests_src, task_dir / "tests")
 
     subprocess.run(["git", "-C", str(repo_root), "add", str(task_dir.relative_to(repo_root))], check=True)
