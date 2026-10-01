@@ -10,11 +10,12 @@ from pathlib import Path
 
 from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from common.resultshape import apply_visibility
 from common.taskspec import TaskError
 
-from .auth import SESSION_COOKIE, AuthError, VisibilityError, assert_can_view, build_authenticator
+from .auth import SESSION_COOKIE, AuthError, VisibilityError, assert_can_view, build_authenticator, verify_session
 from .config import Config, load
 from .docker_ops import DockerOps
 from .jobs import JobService, QueueFull
@@ -23,6 +24,7 @@ from .oauth_github import build_router as build_github_router
 from .quota import Quota, QuotaExceeded
 from .runner import LocalDockerEvaluator
 from .store import Store
+from .tasks_web import list_tasks
 from .validate import ValidationError
 
 log = logging.getLogger("selftest")
@@ -136,7 +138,17 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
     @app.get("/api/submissions")
     def list_submissions(x_team_token: str | None = Header(default=None),
                         session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> list[dict]:
-        return store.list_for_team(team_of(x_team_token, session))
+        subs = store.list_for_team(team_of(x_team_token, session))
+        # The web UI's history page renders a per-row score straight from
+        # this list (no N+1 fetch per row from the client), same shape as
+        # GET /submissions/{id}, visibility-filtered the same way. One
+        # load_result() per row; the list is capped (default 20), so this
+        # stays cheap. See docs/parity.md §7.
+        for sub in subs:
+            result = store.load_result(sub["id"])
+            if result:
+                sub["result"] = apply_visibility(result, result.get("visibility", "public"))
+        return subs
 
     def no_sniff(resp: FileResponse) -> FileResponse:
         resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -219,9 +231,32 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
             raise HTTPException(status_code=404, detail="artifact not found")
         return no_sniff(FileResponse(target))
 
+    # ------------------------------------------------------------- web UI
+    # Support endpoints for server/app/static's SPA — reads of a GitHub
+    # login session and the task picker. Neither existed before this pass;
+    # both are additive and don't touch grading/auth internals. See
+    # docs/parity.md §7.
+
+    @app.get("/api/me")
+    def get_me(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> JSONResponse:
+        payload = verify_session(cfg.session_secret, session, cfg.session_max_age_s) if session and cfg.session_secret else None
+        if not payload or "github_id" not in payload:
+            return JSONResponse({"error": "sign in required"}, status_code=401)
+        return JSONResponse({"githubId": str(payload["github_id"]), "login": payload.get("github_login")})
+
+    @app.get("/api/tasks")
+    def get_tasks(x_team_token: str | None = Header(default=None),
+                 session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> JSONResponse:
+        team_of(x_team_token, session)  # raises 401 if not authenticated
+        return JSONResponse({"tasks": list_tasks(cfg.tasks_dir)})
+
+    static_dir = Path(__file__).parent / "static"
+
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
-        return FileResponse(Path(__file__).parent / "static" / "index.html")
+        return FileResponse(static_dir / "index.html")
+
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     return app
 

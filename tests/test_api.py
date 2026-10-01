@@ -184,6 +184,21 @@ def test_unknown_submission_is_not_found(tmp_path):
     assert resp.status_code == 404
 
 
+def test_list_submissions_includes_each_result(tmp_path):
+    # The web UI's history page renders a per-row score straight from the
+    # list response (no N+1 fetch per row from the client) — same shape as
+    # GET /submissions/{id}, visibility-filtered the same way.
+    client, fake, _ = build_client(tmp_path)
+    resp = submit(client, VALID_ZIP)
+    sub_id = resp.json()["id"]
+    wait_done(client, sub_id)
+
+    listed = client.get("/api/submissions", headers={"X-Team-Token": "team-a"}).json()
+    assert len(listed) == 1
+    assert listed[0]["result"]["passed"] == 1
+    assert listed[0]["result"]["total"] == 1
+
+
 def test_list_submissions_only_shows_own_team(tmp_path):
     client, _, _ = build_client(tmp_path, daily_limit=10)
     submit(client, VALID_ZIP, token="team-a")

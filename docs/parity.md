@@ -173,3 +173,118 @@ what survived and why:
 `server-docs` should also refresh `server/README_SERVER.md` — it still
 describes the pre-task-format flow (`SELFTEST_TEST_PACK_DIR`, no `task_id`
 in the submit example) and needs the task-based flow from §1 above.
+
+## 7. Web frontend parity (`server/app/static`)
+
+Goal of this section: the server channel's web UI (`server/app/static/`)
+looks and behaves identically to `actions/web` (Next.js, deployed on
+Vercel) — same pages, same copy, same GitHub login flow, same status
+vocabulary. `actions/web` is still the design source of truth (it's what
+`web-design` iterates on); `server/app/static` is a plain-JS re-implementation
+kept in sync by hand against it, not a shared build output — see "why not a
+real shared build" below.
+
+### What ships
+
+- `server/app/static/app.css` — byte-for-byte copy of
+  `actions/web/app/globals.css` (pure CSS, no Next-specific syntax, so it
+  copies cleanly). **When `globals.css` changes, re-copy it here** (keep the
+  one-paragraph sync note at the top of `app.css`, drop in the rest
+  verbatim).
+- `server/app/static/app.js` — vanilla JS (no build step, no framework)
+  re-implementing every page in `actions/web/app/*/page.tsx` and the shared
+  pieces in `actions/web/app/_ui/index.tsx`: hash router (`#/`, `#/tasks`,
+  `#/submit/<id>`, `#/submissions`, `#/submissions/<id>`), status pills,
+  quota meter, dropzone upload, history table, score card, test list with
+  pass/fail tabs, waiting/polling state, theme toggle (dark default, same as
+  the competition site). Copy strings are duplicated by hand from the TSX —
+  **when wording changes in `actions/web`, mirror it in `app.js`**.
+- `server/app/web_auth.py` + new routes in `server/app/main.py` —
+  GitHub OAuth for this channel (`/api/auth/github/login`,
+  `/api/auth/github/callback`, `/api/auth/logout`, `/api/me`), independent
+  of `actions/web`'s NextAuth setup: **a separate GitHub OAuth App with its
+  own client id/secret and callback URL**, configured via
+  `SELFTEST_GITHUB_OAUTH_CLIENT_ID`/`_SECRET` (see `.env.example`). Session
+  is a signed cookie (`SELFTEST_WEB_SESSION_SECRET`), not a DB-backed
+  session store. A signed-in GitHub login becomes its own "team" for the
+  existing quota/ownership system (`team = github login`) — `X-Team-Token`
+  auth is untouched and still works for non-browser callers.
+- `server/app/tasks_web.py` — `/api/tasks` for the picker, with the same
+  unlisted-task-ids/display-name filtering as
+  `actions/web/lib/taskVisibility.ts`. **Keep the two lists in sync by
+  hand** (also mirrored a third time as `DISPLAY_NAMES` in `app.js`, so the
+  submit page can show a title before `/api/tasks` has loaded).
+
+### Why not a real shared build
+
+The lead's instruction was to share one frontend source if practical. It
+isn't, cleanly: `actions/web` is a Next.js app built and deployed by Vercel
+from the `actions/web/` subtree (its own `package.json`, its own
+`next.config.mjs`); `server/app/static` is static files served directly by
+FastAPI, no Node toolchain in this process at all. Pointing Next's
+`globals.css` at a file outside `actions/web/` risks breaking Vercel's build
+(unclear whether its root-directory setting would even upload a sibling
+`shared/` folder), and `web-design`/`web-login` are actively iterating on
+`actions/web` — editing its files from here risked stepping on that work.
+So the CSS is a verbatim copy (framework-agnostic, safe to diff) and the JS
+is a parallel implementation against the same backend contract, not a
+shared bundle. If a real monorepo-wide frontend build is wanted later, the
+CSS is the one piece that's already literally identical and would need zero
+rework to extract.
+
+### Backend contract differences this bridges
+
+`actions/web`'s `Submission`/`GradeResult` TS types (camelCase, `status:
+'queued'|'passed'|'failed'|'error'`) don't match this server's existing API
+(`server/app/main.py`, snake_case, `status: 'queued'|'building'|'running'|
+'done'|'failed'|'error'`) — that API predates this work and other callers
+(the CLI, `X-Team-Token` integrations) depend on its current shape, so
+`app.js` adapts client-side (`mapSubmission`/`mapResult`) rather than
+changing the wire format: `'done'→'passed'`, `'building'→'running'`,
+everything else passes through.
+
+One gap *was* fixed server-side because the frontend genuinely needed it:
+`GET /api/submissions` (the list endpoint) only ever returned submission
+metadata, not each one's result — `actions/web`'s equivalent returns the
+full stored record including `result`, which is what the history page's
+per-row score column reads directly. Added a `store.load_result()` per row
+in `list_submissions` (`server/app/main.py`); capped list size (default 20),
+so this stays cheap. Covered by
+`tests/test_api.py::test_list_submissions_includes_each_result`.
+
+### `system_error` is a convention, not a flag — heads up for grading-side changes
+
+`effectiveStatus()` (both the TSX and `app.js` copies) only promotes a
+`status: "error"` submission to the "系统错误 · 不计次数" ("system error,
+doesn't count against quota") display state when its `detail` text matches
+`/could not start grading|system[_ ]error/i`. `app.js` does **not**
+additionally guess at this from `LocalDockerEvaluator`'s other error
+`detail` strings (`"build failed: …"`, `"app did not become ready within
+Ns"`, etc.) — those stay plain `"error"` ("运行失败"), i.e. treated as the
+submitted app's fault, which is correct for build/readiness failures but
+means a genuine infra failure inside `evaluate()` (docker daemon down
+mid-run, an unhandled exception) currently displays and quota-counts as a
+normal app error, not a system error. If grading-side work wants specific
+failures to show as system-error-and-not-count, the two options that fit
+this convention without another round of frontend changes: include the
+literal substring `"system_error"` in `EvalResult.detail` for that case, or
+(more correctly) release the submitter's quota for it the way
+`actions/web`'s dispatch-failure path does — this is a `jobs.py`/`quota.py`
+decision, left to grading/backend work rather than made here.
+
+### Manual verification
+
+No GitHub OAuth App was registered for this channel (would need the lead's
+or an org owner's GitHub access), so the login→callback round trip itself
+is untested end-to-end — covered instead by unit tests
+(`tests/test_web_auth.py`) for the session cookie, state-cookie CSRF check,
+and the routes' auth gating. Everything reachable without a real OAuth
+exchange was verified by running the server locally and driving it with a
+real browser: unauthenticated home, authenticated home/tasks/submit
+(including drag-drop file selection and the quota-exhausted state),
+history table across all status pills (queued/running/passed/failed/system
+error), submission detail for passed/failed/hidden-visibility/queued/system
+error (including expanding a failed test's error text), and the light/dark
+theme toggle. Submitting an actual zip through `LocalDockerEvaluator`
+wasn't exercised (needs Docker; out of scope for this machine per
+project convention — use the grader repo's own CI for that).
