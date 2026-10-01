@@ -42,11 +42,12 @@ on:
 
 jobs:
   # Computes a bounded "lane" (hash of submission_id mod GRADE_LANES) so the
-  # grade job below can use it as a concurrency group: same submission_id
-  # always serializes against itself (no duplicate concurrent runs for one
-  # submission), and overall parallelism across *different* submissions is
-  # capped at GRADE_LANES regardless of how many dispatch at once. No
-  # repo checkout, no secrets, no write access needed for this.
+  # grade job below can use it as a concurrency group, validates/normalizes
+  # every untrusted input, and verifies the dispatch's HMAC signature. This
+  # is the ONLY job that holds SELFTEST_DISPATCH_SIGNING_KEY, and it never
+  # checks out or runs anything derived from the submission itself (no
+  # download, no build) — so holding that secret here is safe even though
+  # the submission content is fully untrusted at this point.
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -57,10 +58,10 @@ jobs:
       task_id: ${{ steps.in.outputs.task_id }}
       download_url: ${{ steps.in.outputs.download_url }}
       visibility_override: ${{ steps.in.outputs.visibility_override }}
-      callback_url: ${{ steps.in.outputs.callback_url }}
-      submission_timestamp: ${{ steps.in.outputs.submission_timestamp }}
-      submission_signature: ${{ steps.in.outputs.submission_signature }}
+      callback_url: ${{ steps.sig.outputs.callback_url }}
       lane: ${{ steps.in.outputs.lane }}
+      dispatch_status: ${{ steps.sig.outputs.status }}
+      dispatch_detail: ${{ steps.sig.outputs.detail }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,38 +106,102 @@ jobs:
             echo "lane=$LANE"
           } >> "$GITHUB_OUTPUT"
 
+      # Authenticates the dispatch itself — see scripts/verify_signature.py
+      # and README_ACTIONS.md "Submitter identity & quota". An invalid or
+      # unauthenticated dispatch means submission_id/task_id/callback_url are
+      # all untrusted too, so callback_url is dropped (status=rejected below
+      # skips the build entirely in the `grade` job — no secret, no build,
+      # no callback for a request that never proved it was the real service).
+      - name: Verify dispatch signature
+        id: sig
+        env:
+          SUBMISSION_ID: ${{ steps.in.outputs.submission_id }}
+          TASK_ID: ${{ steps.in.outputs.task_id }}
+          SUBMISSION_TIMESTAMP: ${{ steps.in.outputs.submission_timestamp }}
+          SUBMISSION_SIGNATURE: ${{ steps.in.outputs.submission_signature }}
+          CALLBACK_URL: ${{ steps.in.outputs.callback_url }}
+          SELFTEST_DISPATCH_SIGNING_KEY: ${{ secrets.SELFTEST_DISPATCH_SIGNING_KEY }}
+        run: |
+          set -uo pipefail
+          SIG_ERR="$(python3 scripts/verify_signature.py \
+            --submission-id "$SUBMISSION_ID" --task-id "$TASK_ID" \
+            --timestamp "${SUBMISSION_TIMESTAMP:-0}" --signature "${SUBMISSION_SIGNATURE:-}" 2>&1 >/dev/null)"
+          SIG_RC=$?
+          if [ "$SIG_RC" -ne 0 ]; then
+            {
+              echo "status=rejected"
+              echo "detail=dispatch rejected: ${SIG_ERR:-invalid signature}"
+              echo "callback_url="
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "status=ok"
+              echo "detail="
+              echo "callback_url=$CALLBACK_URL"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  # Builds and runs the submitted app — fully untrusted code. Read-only
+  # GITHUB_TOKEN, and the only secret it can see is APP_DOWNLOAD_TOKEN
+  # (scoped to read-only access to app zip storage, nothing else; see
+  # README_ACTIONS.md "Secrets & least privilege"). No CALLBACK_TOKEN, no
+  # SELFTEST_DISPATCH_SIGNING_KEY, no write access to this repo: a container
+  # escape here cannot push to the grader repo or forge a result callback.
   grade:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
     concurrency:
       group: grade-lane-${{ needs.prepare.outputs.lane }}
       cancel-in-progress: false
+    outputs:
+      result_status: ${{ steps.summary.outputs.status }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Grade
+        id: run
+        continue-on-error: true
         env:
           SUBMISSION_ID: ${{ needs.prepare.outputs.submission_id }}
           TASK_ID: ${{ needs.prepare.outputs.task_id }}
           DOWNLOAD_URL: ${{ needs.prepare.outputs.download_url }}
           VISIBILITY_OVERRIDE: ${{ needs.prepare.outputs.visibility_override }}
-          CALLBACK_URL: ${{ needs.prepare.outputs.callback_url }}
-          CALLBACK_TOKEN: ${{ secrets.SELFTEST_CALLBACK_TOKEN }}
+          DISPATCH_STATUS: ${{ needs.prepare.outputs.dispatch_status }}
+          DISPATCH_DETAIL: ${{ needs.prepare.outputs.dispatch_detail }}
           APP_DOWNLOAD_TOKEN: ${{ secrets.APP_DOWNLOAD_TOKEN }}
-          SUBMISSION_TIMESTAMP: ${{ needs.prepare.outputs.submission_timestamp }}
-          SUBMISSION_SIGNATURE: ${{ needs.prepare.outputs.submission_signature }}
-          SELFTEST_DISPATCH_SIGNING_KEY: ${{ secrets.SELFTEST_DISPATCH_SIGNING_KEY }}
-          GH_TOKEN: ${{ github.token }}
         run: bash scripts/grade.sh
+
+      - name: Summarize result for the report job
+        id: summary
+        if: always()
+        run: |
+          if [ -f .gradework/results/result.json ]; then
+            python3 -c "import json;print('status='+json.load(open('.gradework/results/result.json'))['status'])" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=system_error" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Small, specific artifact the `report` job downloads to deliver the
+      # result — never the whole .gradework tree (that's the debug artifact
+      # below, for maintainers only).
+      - name: Upload result.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ needs.prepare.outputs.submission_id }}
+          path: .gradework/results/result.json
+          retention-days: 1
+          if-no-files-found: ignore
 
       # Debugging aid for whoever maintains this grader repo, not for
       # participants (who never have access to this repo or its artifacts).
-      # Safe to delete if you don't want build/runner logs retained at all.
+      # Safe to delete if you don't want build/runner logs retained at all —
+      # see docs/security-review.md item #6.
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -145,3 +210,58 @@ jobs:
           path: .gradework/results
           retention-days: 3
           if-no-files-found: ignore
+
+  # Delivers the result to the submitter — the only job with contents:write
+  # and the callback/signing secrets. It never checks out the submission,
+  # builds anything, or runs Docker: its only input from the untrusted path
+  # is result.json, already visibility-filtered by parse_report.py in the
+  # `grade` job. Runs even if `grade` failed/timed out so a participant
+  # (or the self-test service) always gets a structured answer back.
+  report:
+    needs: [prepare, grade]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download result.json
+        id: dl
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: result-${{ needs.prepare.outputs.submission_id }}
+          path: .gradework/results
+
+      # grade.sh / its job can fail before ever producing result.json
+      # (e.g. the runner OOM-killed the whole job) — synthesize one rather
+      # than silently reporting nothing back.
+      - name: Synthesize a fallback result if none was produced
+        if: steps.dl.outcome != 'success'
+        run: |
+          mkdir -p .gradework/results
+          python3 -c "
+          import json
+          json.dump({
+              'submission_id': '${{ needs.prepare.outputs.submission_id }}',
+              'task_id': '${{ needs.prepare.outputs.task_id }}',
+              'visibility': 'public',
+              'status': 'system_error',
+              'passed': 0,
+              'total': 0,
+              'detail': 'grade job produced no result (crashed or was killed)',
+          }, open('.gradework/results/result.json', 'w'))
+          "
+
+      - name: Report back
+        env:
+          CALLBACK_URL: ${{ needs.prepare.outputs.callback_url }}
+          CALLBACK_TOKEN: ${{ secrets.SELFTEST_CALLBACK_TOKEN }}
+          SELFTEST_DISPATCH_SIGNING_KEY: ${{ secrets.SELFTEST_DISPATCH_SIGNING_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          RESULT_FILE: .gradework/results/result.json
+        run: python3 scripts/report_back.py
