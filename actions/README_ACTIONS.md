@@ -358,31 +358,56 @@ service (already true via the existing daily quota).
 ## Verified run
 
 Tested against a real private repo (`BH3GEI/arcbench-grader-demo`, private,
-initialized from this template) with the `demo-todo` task, covering all
-three required outcomes end to end (triggered with `workflow_dispatch`,
-downloading each app from the private repo itself over HTTPS with a bearer
-token — the same download path a pre-signed submission URL would use).
+initialized from this template) with the `demo-todo` task (5 tests),
+`SELFTEST_DISPATCH_SIGNING_KEY` configured, covering every required outcome
+end to end — triggered with `workflow_dispatch`, apps downloaded from the
+private repo itself over HTTPS with a bearer token (the same download path a
+pre-signed submission URL would use), each dispatch carrying a real HMAC
+signature computed the same way the self-test service would.
 
-- **Good app** (`examples/app-todo`, `visibility: public`) — all 4 tests
-  pass. Run: https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36860025835
-  Result: `{"status":"passed","passed":4,"total":4}`, published at
-  https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-demo-good-002
-- **Broken app** (`examples/app-todo-broken`, `visibility: public`) — 1/4
-  tests pass, the 3 failures include per-test error text. Run:
-  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36860750858
-  Result: `{"status":"failed","passed":1,"total":4,"detail":"3/4 tests failed"}`
-  with each failing test's error message, published at
-  https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-demo-bad-003
+- **Good app** (`examples/app-todo`, `visibility: public`) — 5/5 pass. Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36866086278
+  Result: `{"status":"passed","passed":5,"total":5}`, published at
+  https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-final2-good-001
+- **Broken app** (`examples/app-todo-broken`, `visibility: public`) — 1/5
+  pass, 4 failures each with error text. Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36866099951
+  Result: `{"status":"failed","passed":1,"total":5,"detail":"4/5 tests failed"}`,
+  published at
+  https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-final2-bad-001
 - **Hidden task** (good app, `visibility_override: hidden`) — only
-  `passed`/`total` returned, no titles, no error text. Run:
-  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36860070293
-  Result: `{"status":"passed","passed":4,"total":4,"visibility":"hidden"}` —
-  no `tests` key at all, published at
-  https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-demo-hidden-002
+  `passed`/`total` (5/5), no `tests` key at all. Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36866112520
+  Result: `{"status":"passed","passed":5,"total":5,"visibility":"hidden"}`,
+  published at
+  https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-final2-hidden-001
+- **Partially-finished app** ("60 分" case — `examples/app-todo-partial`,
+  deleting unimplemented, wrong error text) — 3/5 pass, matching the app's
+  own documented expectation. Run:
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36866937339
+  Result: `{"status":"failed","passed":3,"total":5,"detail":"2/5 tests failed"}`
+  with real per-test error text (a timeout and a failed assertion), published
+  at https://github.com/BH3GEI/arcbench-grader-demo/releases/tag/result-final3-partial-001
+- **Wrong dispatch signature** — rejected before any build/run, no callback
+  attempted. Run (job fails fast, ~45s, no build/run steps execute):
+  https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36866133193
+  Result: `{"status":"error","detail":"dispatch rejected: signature mismatch"}`
+- **Quota exceeded** — this one has no Actions run by design: the self-test
+  service checks quota *before* dispatching (unchanged, see "Submitter
+  identity & quota"), so an over-quota submission never reaches the grader
+  at all. Verified at the layer that actually enforces it instead —
+  `server/app/quota.py`'s own `Quota`, exercised directly: 3 consecutive
+  `try_consume()` calls against a `limit=3` quota succeed (remaining 2, 1, 0),
+  the 4th raises `QuotaExceeded: team 'demo-team' reached the daily limit of
+  3 submissions`, and `status()` correctly reports `used=3, remaining=0`
+  afterwards. Same code path `tests/test_quota.py` already covers.
 
-Two bugs surfaced and were fixed during this verification (both only in the
-Actions template, not in this repo's local `docker compose` channel):
+Three bugs surfaced and were fixed during this verification (all isolated to
+the Actions template, not this repo's local `docker compose` channel):
 globally-installed `@playwright/test` wasn't resolvable from the read-only
-mounted test pack (fixed with `NODE_PATH` in `runner/Dockerfile`), and
-per-test error messages were being read off the wrong report node (fixed in
-`scripts/parse_report.py`).
+mounted test pack (fixed with `NODE_PATH` in `runner/Dockerfile`), per-test
+error messages were being read off the wrong report node (fixed in
+`scripts/parse_report.py`), and the partial-app test fixture didn't actually
+get committed the first time (`*.zip` is gitignored on purpose; test
+fixtures need `git add -f`, same as the earlier good/bad ones — caught by
+the resulting "download failed" and fixed by re-adding).
