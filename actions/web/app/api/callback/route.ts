@@ -31,7 +31,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'unknown submission' }, { status: 404 });
   }
 
-  await recordResult(existing.id, result);
+  // A result may already be there (recovered from the grader's artifact, or a
+  // re-run report job): first write wins, and that's still a success.
+  const recorded = await recordResult(existing.id, result);
+  if (!recorded) return NextResponse.json({ ok: true, duplicate: true });
 
   // Best-effort cleanup: the app zip has no further use once grading is done.
   try {

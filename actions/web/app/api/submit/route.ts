@@ -82,16 +82,19 @@ export async function POST(req: Request) {
   // faster than you'd expect, and the callback looks this record up by id
   // — it must already exist.
   const now = Date.now();
-  await createSubmission({
-    id: submissionId,
-    githubId: user.githubId,
-    githubLogin: user.githubLogin,
-    taskId,
-    createdAt: now,
-    status: 'queued',
-    updatedAt: now,
-    result: null,
-  });
+  await createSubmission(
+    {
+      id: submissionId,
+      githubId: user.githubId,
+      githubLogin: user.githubLogin,
+      taskId,
+      createdAt: now,
+      status: 'queued',
+      updatedAt: now,
+      result: null,
+    },
+    [userQuota.markerPath, globalQuota.markerPath],
+  );
 
   const baseUrl = process.env.NEXTAUTH_URL || new URL(req.url).origin;
   const callbackUrl = `${baseUrl}/api/callback`;
@@ -101,13 +104,12 @@ export async function POST(req: Request) {
   try {
     await dispatchGrade({ submissionId, taskId, downloadUrl: blobUrl, callbackUrl, timestamp, signature });
   } catch (err) {
-    await releaseUserQuota(userQuota.markerPath);
-    await releaseGlobalQuota(globalQuota.markerPath);
+    // system_error releases this submission's quota markers itself.
     await recordResult(submissionId, {
       submission_id: submissionId,
       task_id: taskId,
       visibility: 'public',
-      status: 'error',
+      status: 'system_error',
       passed: 0,
       total: 0,
       detail: `could not start grading: ${String(err)}`,

@@ -15,7 +15,8 @@ export const DAILY_LIMIT = 10;
 export const MAX_ZIP_MB = 50;
 
 // 前端额外识别的状态（后端可能后续加入）；未知状态按原样显示。
-export type UiStatus = Submission['status'] | 'running' | 'system_error';
+// not_run：提交本身有问题（zip 不合规、缺 Dockerfile、构建或启动失败），测试没有执行；计入次数。
+export type UiStatus = Submission['status'] | 'running' | 'not_run';
 
 export function effectiveStatus(s: Submission): UiStatus {
   const st = s.status as string;
@@ -23,7 +24,31 @@ export function effectiveStatus(s: Submission): UiStatus {
   if (st === 'error' && /could not start grading|system[_ ]error/i.test(s.result?.detail ?? '')) {
     return 'system_error';
   }
+  if ((st === 'failed' || st === 'error') && s.result && s.result.total === 0) return 'not_run';
   return st as UiStatus;
+}
+
+// 评测机返回的英文原因 -> 选手能看懂的中文说明。
+const FAILURE_ZH: [RegExp, string, string][] = [
+  [
+    /zip failed validation/i,
+    'zip 包未通过安全检查',
+    'zip 中含有不允许的路径（如 ../ 或绝对路径）、解压后体积过大或文件数过多。请在 app 根目录下重新打包后再提交。',
+  ],
+  [
+    /no Dockerfile/i,
+    'zip 根目录缺少 Dockerfile',
+    'Dockerfile 需要位于 zip 的根目录，不能放在子文件夹里。打包时请选中 app 目录内的文件，而不是外层文件夹。',
+  ],
+  [/build exceeded/i, '镜像构建超时', '构建时间超过上限。请精简构建步骤，构建过程中无法访问外网。'],
+  [/app build failed/i, '镜像构建失败', '请先在本地运行 docker build 确认能构建成功。构建过程中无法访问外网。'],
+  [/did not become ready/i, 'app 未能在限定时间内启动', '请检查启动命令，并确认 app 监听 PORT 环境变量指定的端口。'],
+  [/test run exceeded/i, '测试运行超时', '测试整体运行时间超过上限。'],
+];
+
+export function failureReason(detail: string | undefined): { title: string; hint: string } {
+  for (const [re, title, hint] of FAILURE_ZH) if (re.test(detail ?? '')) return { title, hint };
+  return { title: 'app 未能运行', hint: '镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。' };
 }
 
 export function isPending(st: UiStatus) {
@@ -36,6 +61,7 @@ const STATUS_META: Record<string, { label: string; tone: string; live?: boolean 
   passed: { label: '全部通过', tone: 'pill-success' },
   failed: { label: '未全部通过', tone: 'pill-danger' },
   error: { label: '运行失败', tone: 'pill-danger' },
+  not_run: { label: '未能运行', tone: 'pill-danger' },
   system_error: { label: '系统错误 · 不计次数', tone: 'pill-warning' },
 };
 

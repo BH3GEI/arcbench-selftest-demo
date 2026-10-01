@@ -1,4 +1,6 @@
-export type SubmissionStatus = 'queued' | 'passed' | 'failed' | 'error';
+// system_error = the grading platform failed (not the participant's app);
+// it never counts against the daily quota.
+export type SubmissionStatus = 'queued' | 'passed' | 'failed' | 'error' | 'system_error';
 
 export type TestCaseResult = {
   title: string;
@@ -12,7 +14,9 @@ export type GradeResult = {
   submission_id: string;
   task_id: string;
   visibility: 'public' | 'hidden';
-  status: 'passed' | 'failed' | 'error';
+  // 'rejected' only comes from a dispatch the grader couldn't authenticate;
+  // store.ts normalizes it (and 'error') to system_error on the way in.
+  status: 'passed' | 'failed' | 'error' | 'system_error' | 'rejected';
   passed: number;
   total: number;
   detail: string;

@@ -380,14 +380,16 @@ message) is the web app's job, not this repo's.
 
 ## Concurrency, resource limits & retries
 
-- **Concurrency**: a `prepare` job hashes `submission_id` into one of
-  `GRADE_LANES` (default 4, set in `grade.yml`) lanes; the `grade` job's
-  `concurrency: group: grade-lane-<N>` serializes within a lane. This bounds
-  total parallelism to `GRADE_LANES` regardless of burst size, and
-  incidentally re-dispatching the same `submission_id` always serializes
-  against its own earlier run (same hash → same lane). Raise `GRADE_LANES` to
-  trade isolation-per-lane for more throughput, within whatever concurrent-job
-  limit your GitHub plan/org allows.
+- **Concurrency**: no `concurrency:` group on the `grade` job. Parallelism
+  is bounded by the GitHub plan/org concurrent-job limit, and jobs beyond it
+  wait in GitHub's own runner queue. An earlier version serialized jobs into
+  `GRADE_LANES` lanes with `concurrency: group: grade-lane-<N>`, but a
+  concurrency group keeps at most one *pending* job: a burst of three or more
+  submissions in one lane cancelled the waiting ones, their `report` job was
+  skipped, and those submitters never got a result. (`lane` is still
+  computed in `prepare`, for logs only.) The `report` job runs on
+  `always()`, so even a cancelled or skipped `grade` job yields a
+  `system_error` result instead of silence.
 - **Timeouts**: per-task `build_timeout_s`/`ready_timeout_s`/`run_timeout_s`
   from `requirements.yaml` (defaults 600/60/900s), plus a job-level
   `timeout-minutes: 20` backstop in `grade.yml` in case something hangs
@@ -539,10 +541,6 @@ service (already true via the existing daily quota).
 - A repo collaborator with write/read access to the grader repo can still
   see task content and run results directly — the isolation here is "no
   participant access to this repo," not a sandbox against repo admins.
-- `GRADE_LANES` bounds parallelism but isn't a real queue: two unrelated
-  submissions that hash to the same lane wait on each other, and there's no
-  priority or fairness — fine at the scale this template targets, not a
-  substitute for a proper job queue at much higher volume.
 - GitHub Actions concurrent-job and monthly-minutes limits apply like any
   other workflow; very high submission volume may need self-hosted runners.
 
@@ -562,8 +560,8 @@ service (already true via the existing daily quota).
       run（好 app、坏 app 各一次）确认链路通。
 - [ ] `GRADER_RUNNER_IMAGE`（可选）已指向预构建镜像，避免每次评测都重新装
       Playwright/Chromium；或接受首次构建的 1-2 分钟开销。
-- [ ] `GRADE_LANES`（默认 4）与预期并发提交量匹配，并结合组织的 Actions
-      并发 job 上限一起估算过吞吐（见「Cost / usage estimate」）。
+- [ ] 组织的 Actions 并发 job 上限与预期并发提交量匹配，估算过吞吐
+      （见「Cost / usage estimate」）。
 - [ ] 回归验证：好 / 坏 / hidden / 部分通过 / 签名错误被拒 均按预期表现——
       结果见下方「Verified run」。
 - [ ] README 中列出的 secrets 名称与仓库实际配置的 secrets 一致，且没有遗留
@@ -599,9 +597,8 @@ service (already true via the existing daily quota).
   服务与 grader 仓库两侧 `SELFTEST_DISPATCH_SIGNING_KEY` 是否一致，再检查
   服务端签名时间戳是否有明显时钟偏移（默认容忍窗口 300 秒，见
   `scripts/verify_signature.py` 的 `--max-age-s`）。
-- 整体吞吐变慢、submission 排队明显 → 检查是不是同一个 `submission_id` 被
-  重复 dispatch（会一直排在同一 lane 里串行），或是已经顶到组织的 Actions
-  并发 job 上限；必要时调大 `GRADE_LANES`。
+- 整体吞吐变慢、submission 排队明显 → 多半是已经顶到组织的 Actions 并发
+  job 上限，多出的 job 会在 GitHub 的 runner 队列里等待，不会被取消。
 - Playwright/Chromium 相关的 runner 镜像构建失败 → 多为上游 `node`/
   `playwright` 基础镜像变更，先本地 `docker build ./runner` 复现；临时缓解
   可把 `runner/Dockerfile` 里的 `PLAYWRIGHT_VERSION` 锁定到上一个已知可用

@@ -41,9 +41,9 @@ on:
         description: "hex HMAC-SHA256; only needed to test signature rejection"
 
 jobs:
-  # Computes a bounded "lane" (hash of submission_id mod GRADE_LANES) so the
-  # grade job below can use it as a concurrency group, validates/normalizes
-  # every untrusted input, and verifies the dispatch's HMAC signature. This
+  # Computes a bounded "lane" (hash of submission_id mod GRADE_LANES; kept as
+  # an output for logs only — see the grade job on why it is no longer a
+  # concurrency group), validates/normalizes every untrusted input, and verifies the dispatch's HMAC signature. This
   # is the ONLY job that holds SELFTEST_DISPATCH_SIGNING_KEY, and it never
   # checks out or runs anything derived from the submission itself (no
   # download, no build) — so holding that secret here is safe even though
@@ -123,10 +123,14 @@ jobs:
           SELFTEST_DISPATCH_SIGNING_KEY: ${{ secrets.SELFTEST_DISPATCH_SIGNING_KEY }}
         run: |
           set -uo pipefail
+          # `|| SIG_RC=$?`, not a bare `SIG_RC=$?` on the next line: the
+          # step's shell runs with -e, so a failing command substitution in a
+          # plain assignment aborted the step before status=rejected was
+          # written, failing the whole job instead.
+          SIG_RC=0
           SIG_ERR="$(python3 scripts/verify_signature.py \
             --submission-id "$SUBMISSION_ID" --task-id "$TASK_ID" \
-            --timestamp "${SUBMISSION_TIMESTAMP:-0}" --signature "${SUBMISSION_SIGNATURE:-}" 2>&1 >/dev/null)"
-          SIG_RC=$?
+            --timestamp "${SUBMISSION_TIMESTAMP:-0}" --signature "${SUBMISSION_SIGNATURE:-}" 2>&1 >/dev/null)" || SIG_RC=$?
           if [ "$SIG_RC" -ne 0 ]; then
             {
               echo "status=rejected"
@@ -153,9 +157,11 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-    concurrency:
-      group: grade-lane-${{ needs.prepare.outputs.lane }}
-      cancel-in-progress: false
+    # No `concurrency:` group here on purpose. A group keeps at most ONE
+    # pending job: a third submission landing in a busy lane cancelled the
+    # one already waiting ("Canceling since a higher priority waiting request
+    # exists"), its report job was skipped, and that submission never got a
+    # result. GitHub's own runner queue already queues without dropping.
     outputs:
       result_status: ${{ steps.summary.outputs.status }}
     steps:
@@ -181,10 +187,12 @@ jobs:
         if: always()
         run: |
           if [ -f .gradework/results/result.json ]; then
-            python3 -c "import json;print('status='+json.load(open('.gradework/results/result.json'))['status'])" >> "$GITHUB_OUTPUT"
+            STATUS="$(python3 -c "import json;print(json.load(open('.gradework/results/result.json'))['status'])")"
           else
-            echo "status=system_error" >> "$GITHUB_OUTPUT"
+            STATUS="system_error"
           fi
+          echo "result status: $STATUS"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
 
       # Small, specific artifact the `report` job downloads to deliver the
       # result — never the whole .gradework tree (that's the debug artifact
@@ -219,7 +227,9 @@ jobs:
   # (or the self-test service) always gets a structured answer back.
   report:
     needs: [prepare, grade]
-    if: ${{ !cancelled() }}
+    # always(), not !cancelled(): a cancelled or skipped grade job must still
+    # produce a (system_error) answer, or the submitter waits forever.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:

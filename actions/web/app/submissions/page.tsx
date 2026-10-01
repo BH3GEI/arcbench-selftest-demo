@@ -11,7 +11,6 @@ import {
   StatusBadge,
   effectiveStatus,
   formatTime,
-  isPending,
   pct,
   useSubmissions,
 } from '../_ui';
@@ -100,7 +99,7 @@ function History() {
                           </span>
                         </span>
                       ) : (
-                        <span className="meta">{isPending(st) ? '评测中' : '—'}</span>
+                        <span className="meta">—</span>
                       )}
                     </td>
                     <td className="meta" data-wide>

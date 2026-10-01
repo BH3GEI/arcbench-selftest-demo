@@ -12,6 +12,7 @@ import {
   RequireAuth,
   StatusBadge,
   effectiveStatus,
+  failureReason,
   formatDuration,
   formatTime,
   isPending,
@@ -300,12 +301,17 @@ function Detail({ id }: { id: string }) {
         </section>
       )}
 
-      {(st === 'error' || st === 'failed') && r && r.total === 0 && (
+      {st === 'not_run' && r && (
         <section className="section stack">
-          <Notice tone="danger" title="app 未能启动">
-            镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。
+          <Notice tone="danger" title={failureReason(r.detail).title}>
+            {failureReason(r.detail).hint} 本次计入当日次数。
           </Notice>
           {r.detail && <pre>{r.detail}</pre>}
+          <div>
+            <Link href={resubmit} className="btn btn-primary">
+              修改后重新提交
+            </Link>
+          </div>
         </section>
       )}
 

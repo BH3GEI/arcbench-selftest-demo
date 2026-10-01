@@ -35,6 +35,33 @@ import urllib.error
 import urllib.request
 
 
+def _callback_request(callback_url: str, body: bytes) -> urllib.request.Request:
+    req = urllib.request.Request(callback_url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    token = os.environ.get("CALLBACK_TOKEN", "").strip()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    # Same shared secret used to verify inbound dispatches (see
+    # verify_signature.py) also signs outbound results, so the self-test
+    # service can confirm a result really came from this grader and
+    # wasn't dropped in by anything else that can reach its callback URL
+    # — and, with timestamp+nonce folded into the signed string, can't
+    # be forged or replayed (not even a byte-for-byte resend of a
+    # previously valid POST, which a body-only HMAC would accept forever
+    # within the freshness window).
+    signing_key = os.environ.get("SELFTEST_DISPATCH_SIGNING_KEY", "").strip()
+    if signing_key:
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_hex(16)
+        body_hash = hashlib.sha256(body).hexdigest()
+        message = f"{timestamp}.{nonce}.{body_hash}".encode()
+        sig = hmac.new(signing_key.encode(), message, hashlib.sha256).hexdigest()
+        req.add_header("X-Timestamp", timestamp)
+        req.add_header("X-Nonce", nonce)
+        req.add_header("X-Signature", f"sha256={sig}")
+    return req
+
+
 def main() -> int:
     result_path = os.environ.get("RESULT_FILE", "results/result.json")
     if not os.path.isfile(result_path):
@@ -48,36 +75,23 @@ def main() -> int:
 
     callback_url = os.environ.get("CALLBACK_URL", "").strip()
     if callback_url:
-        req = urllib.request.Request(callback_url, data=body, method="POST")
-        req.add_header("Content-Type", "application/json")
-        token = os.environ.get("CALLBACK_TOKEN", "").strip()
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
-        # Same shared secret used to verify inbound dispatches (see
-        # verify_signature.py) also signs outbound results, so the self-test
-        # service can confirm a result really came from this grader and
-        # wasn't dropped in by anything else that can reach its callback URL
-        # — and, with timestamp+nonce folded into the signed string, can't
-        # be forged or replayed (not even a byte-for-byte resend of a
-        # previously valid POST, which a body-only HMAC would accept forever
-        # within the freshness window).
-        signing_key = os.environ.get("SELFTEST_DISPATCH_SIGNING_KEY", "").strip()
-        if signing_key:
-            timestamp = str(int(time.time()))
-            nonce = secrets.token_hex(16)
-            body_hash = hashlib.sha256(body).hexdigest()
-            message = f"{timestamp}.{nonce}.{body_hash}".encode()
-            sig = hmac.new(signing_key.encode(), message, hashlib.sha256).hexdigest()
-            req.add_header("X-Timestamp", timestamp)
-            req.add_header("X-Nonce", nonce)
-            req.add_header("X-Signature", f"sha256={sig}")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                print(f"[report_back] callback POST -> HTTP {resp.status}")
-            return 0
-        except urllib.error.URLError as exc:
-            print(f"[report_back] callback POST failed: {exc}", file=sys.stderr)
-            return 1
+        # Retried on network errors and 5xx only (a fresh timestamp+nonce per
+        # attempt, since the receiver may already have claimed the previous
+        # nonce). A 4xx is a decided answer — retrying won't change it.
+        delays = [0, 5, 20]
+        for attempt, delay in enumerate(delays, 1):
+            time.sleep(delay)
+            try:
+                with urllib.request.urlopen(_callback_request(callback_url, body), timeout=30) as resp:
+                    print(f"[report_back] callback POST -> HTTP {resp.status}")
+                return 0
+            except urllib.error.HTTPError as exc:
+                print(f"[report_back] callback POST -> HTTP {exc.code} (attempt {attempt})", file=sys.stderr)
+                if exc.code < 500:
+                    return 1
+            except urllib.error.URLError as exc:
+                print(f"[report_back] callback POST failed: {exc} (attempt {attempt})", file=sys.stderr)
+        return 1
 
     tag = f"result-{submission_id}"
     summary = f"status={result.get('status')} passed={result.get('passed')}/{result.get('total')}"

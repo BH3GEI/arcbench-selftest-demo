@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { put, list, del } from '@vercel/blob';
 import type { Submission, GradeResult, SubmissionStatus } from './types';
+import { fetchGraderResult } from './github';
 
 // Vercel KV turned out to need a marketplace integration with an
 // interactive "accept terms" step (no non-interactive provisioning path),
@@ -17,25 +18,45 @@ import type { Submission, GradeResult, SubmissionStatus } from './types';
 // Fix, applied uniformly: never overwrite a blob. Each submission is a
 // small append-only set of objects under `state/submissions/<id>/` —
 // `created.json` written once at submit time, `result.json` written once
-// (if at all) by the callback — and reads always go through list() (which
-// behaved consistently in testing, same as it already did for
-// listUserSubmissions) rather than re-fetching a URL that might have been
-// written to since it was first cached.
+// (if at all) by the callback or recovered from the grader, `timeout.json`
+// written once if no result ever arrives — and reads always go through
+// list() (which behaved consistently in testing, same as it already did
+// for listUserSubmissions) rather than re-fetching a URL that might have
+// been written to since it was first cached.
+//
+// A result can also be missing because the grader never managed to deliver
+// it: a callback rejected by a signature mismatch during a key rotation, a
+// grade job cancelled before it reported, a dispatch the grader refused.
+// Nothing would ever arrive and the page would say "queued" forever, so a
+// queued submission is reconciled on read:
+//   - after RECOVER_AFTER_MS, pull the grade job's own result artifact from
+//     the grader repo (same file the report job would have POSTed);
+//   - after STALE_AFTER_MS with still nothing, write `timeout.json` — a
+//     system_error that releases the quota slot. A late real result.json
+//     still wins over it (see assembleSubmission).
+const RECOVER_AFTER_MS = 8 * 60 * 1000;
+const RECOVER_RETRY_MS = 60 * 1000;
+const STALE_AFTER_MS = 45 * 60 * 1000;
 
 function submissionDir(id: string): string {
   return `state/submissions/${id}/`;
 }
 
-type StoredCreated = Omit<Submission, 'status' | 'result' | 'updatedAt'>;
+type StoredCreated = Omit<Submission, 'status' | 'result' | 'updatedAt'> & {
+  // Quota marker paths consumed by this submission, released if the
+  // platform (not the participant) fails it. Never sent to the browser.
+  quotaMarkers?: string[];
+};
 type StoredResult = { status: SubmissionStatus; result: GradeResult; updatedAt: number };
 
-export async function createSubmission(sub: Submission): Promise<void> {
+export async function createSubmission(sub: Submission, quotaMarkers: (string | null)[] = []): Promise<void> {
   const created: StoredCreated = {
     id: sub.id,
     githubId: sub.githubId,
     githubLogin: sub.githubLogin,
     taskId: sub.taskId,
     createdAt: sub.createdAt,
+    quotaMarkers: quotaMarkers.filter((m): m is string => Boolean(m)),
   };
   await put(`${submissionDir(sub.id)}created.json`, JSON.stringify(created), {
     access: 'public',
@@ -44,13 +65,41 @@ export async function createSubmission(sub: Submission): Promise<void> {
   });
 }
 
-export async function recordResult(id: string, result: GradeResult): Promise<void> {
-  const payload: StoredResult = { status: result.status, result, updatedAt: Date.now() };
-  await put(`${submissionDir(id)}result.json`, JSON.stringify(payload), {
-    access: 'public',
-    addRandomSuffix: false,
-    contentType: 'application/json',
-  });
+function normalizeStatus(status: string): 'passed' | 'failed' | 'system_error' {
+  if (status === 'passed' || status === 'failed') return status;
+  // 'rejected' (the grader refused our own signed dispatch) and 'error'
+  // (could not start grading) are both platform-side failures.
+  return 'system_error';
+}
+
+async function writeOnce(path: string, payload: StoredResult): Promise<boolean> {
+  try {
+    await put(path, JSON.stringify(payload), {
+      access: 'public',
+      addRandomSuffix: false,
+      contentType: 'application/json',
+    });
+    return true;
+  } catch (err) {
+    // put() without allowOverwrite refuses an existing path: first write wins.
+    if (/already exists/i.test(String(err))) return false;
+    throw err;
+  }
+}
+
+async function releaseQuotaMarkers(created: StoredCreated | null): Promise<void> {
+  await Promise.all((created?.quotaMarkers ?? []).map((m) => removeMarker(m)));
+}
+
+/** Returns false if a result was already recorded for this submission. */
+export async function recordResult(id: string, result: GradeResult): Promise<boolean> {
+  const status = normalizeStatus(result.status);
+  const payload: StoredResult = { status, result: { ...result, status }, updatedAt: Date.now() };
+  const written = await writeOnce(`${submissionDir(id)}result.json`, payload);
+  if (written && status === 'system_error') {
+    await releaseQuotaMarkers(await readCreated(id));
+  }
+  return written;
 }
 
 async function fetchJson<T>(url: string): Promise<T | null> {
@@ -59,55 +108,136 @@ async function fetchJson<T>(url: string): Promise<T | null> {
   return (await res.json()) as T;
 }
 
-function assembleSubmission(created: StoredCreated, result: StoredResult | null): Submission {
+function assembleSubmission(
+  created: StoredCreated,
+  result: StoredResult | null,
+  timeout: StoredResult | null,
+): Submission {
+  const r = result ?? timeout;
   return {
-    ...created,
-    status: result?.status ?? 'queued',
-    result: result?.result ?? null,
-    updatedAt: result?.updatedAt ?? created.createdAt,
+    id: created.id,
+    githubId: created.githubId,
+    githubLogin: created.githubLogin,
+    taskId: created.taskId,
+    createdAt: created.createdAt,
+    status: r?.status ?? 'queued',
+    result: r?.result ?? null,
+    updatedAt: r?.updatedAt ?? created.createdAt,
   };
 }
 
-export async function getSubmission(id: string): Promise<Submission | null> {
-  const { blobs } = await list({ prefix: submissionDir(id) });
-  const createdBlob = blobs.find((b) => b.pathname.endsWith('/created.json'));
-  if (!createdBlob) return null;
-  const resultBlob = blobs.find((b) => b.pathname.endsWith('/result.json'));
-  const [created, result] = await Promise.all([
-    fetchJson<StoredCreated>(createdBlob.url),
-    resultBlob ? fetchJson<StoredResult>(resultBlob.url) : Promise.resolve(null),
+type BlobUrls = { created?: string; result?: string; timeout?: string };
+
+const FILE_KEYS: Record<string, keyof BlobUrls> = {
+  'created.json': 'created',
+  'result.json': 'result',
+  'timeout.json': 'timeout',
+};
+
+async function listAll(prefix: string) {
+  const blobs: { pathname: string; url: string }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await list({ prefix, cursor, limit: 1000 });
+    blobs.push(...page.blobs);
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
+  return blobs;
+}
+
+async function urlsFor(id: string): Promise<BlobUrls> {
+  const urls: BlobUrls = {};
+  for (const b of await listAll(submissionDir(id))) {
+    const key = FILE_KEYS[b.pathname.slice(submissionDir(id).length)];
+    if (key) urls[key] = b.url;
+  }
+  return urls;
+}
+
+async function readCreated(id: string): Promise<StoredCreated | null> {
+  const { created } = await urlsFor(id);
+  return created ? fetchJson<StoredCreated>(created) : null;
+}
+
+const lastRecoveryAttempt = new Map<string, number>();
+
+async function reconcile(created: StoredCreated): Promise<Submission | null> {
+  const age = Date.now() - created.createdAt;
+  if (age < RECOVER_AFTER_MS) return null;
+
+  const last = lastRecoveryAttempt.get(created.id) ?? 0;
+  if (Date.now() - last > RECOVER_RETRY_MS) {
+    lastRecoveryAttempt.set(created.id, Date.now());
+    const recovered = await fetchGraderResult(created.id).catch(() => null);
+    if (recovered && recovered.submission_id === created.id) {
+      await recordResult(created.id, recovered);
+      const fresh = await getStoredSubmission(created.id);
+      if (fresh && fresh.status !== 'queued') return fresh;
+    }
+  }
+
+  if (age < STALE_AFTER_MS) return null;
+  const minutes = Math.round(STALE_AFTER_MS / 60000);
+  const result: GradeResult = {
+    submission_id: created.id,
+    task_id: created.taskId,
+    visibility: 'public',
+    status: 'system_error',
+    passed: 0,
+    total: 0,
+    detail: `评测超时：${minutes} 分钟内未收到评测结果。`,
+  };
+  const timeout: StoredResult = { status: 'system_error', result, updatedAt: Date.now() };
+  if (await writeOnce(`${submissionDir(created.id)}timeout.json`, timeout)) {
+    await releaseQuotaMarkers(created);
+  }
+  return assembleSubmission(created, null, timeout);
+}
+
+async function loadSubmission(urls: BlobUrls): Promise<{ created: StoredCreated; sub: Submission } | null> {
+  if (!urls.created) return null;
+  const [created, result, timeout] = await Promise.all([
+    fetchJson<StoredCreated>(urls.created),
+    urls.result ? fetchJson<StoredResult>(urls.result) : Promise.resolve(null),
+    urls.timeout ? fetchJson<StoredResult>(urls.timeout) : Promise.resolve(null),
   ]);
   if (!created) return null;
-  return assembleSubmission(created, result);
+  return { created, sub: assembleSubmission(created, result, timeout) };
+}
+
+async function getStoredSubmission(id: string): Promise<Submission | null> {
+  return (await loadSubmission(await urlsFor(id)))?.sub ?? null;
+}
+
+async function withReconcile(loaded: { created: StoredCreated; sub: Submission } | null) {
+  if (!loaded) return null;
+  if (loaded.sub.status !== 'queued') return loaded.sub;
+  return (await reconcile(loaded.created)) ?? loaded.sub;
+}
+
+export async function getSubmission(id: string): Promise<Submission | null> {
+  return withReconcile(await loadSubmission(await urlsFor(id)));
 }
 
 export async function listUserSubmissions(githubId: string, limit = 50): Promise<Submission[]> {
-  const { blobs } = await list({ prefix: 'state/submissions/' });
-  const byId = new Map<string, { created?: string; result?: string }>();
-  for (const b of blobs) {
+  const byId = new Map<string, BlobUrls>();
+  for (const b of await listAll('state/submissions/')) {
     const rest = b.pathname.slice('state/submissions/'.length);
     const [id, file] = rest.split('/');
-    if (!id || !file) continue;
+    const key = file ? FILE_KEYS[file] : undefined;
+    if (!id || !key) continue;
     const entry = byId.get(id) ?? {};
-    if (file === 'created.json') entry.created = b.url;
-    if (file === 'result.json') entry.result = b.url;
+    entry[key] = b.url;
     byId.set(id, entry);
   }
 
-  const submissions = await Promise.all(
-    Array.from(byId.values()).map(async ({ created, result }) => {
-      if (!created) return null;
-      const c = await fetchJson<StoredCreated>(created);
-      if (!c) return null;
-      const r = result ? await fetchJson<StoredResult>(result) : null;
-      return assembleSubmission(c, r);
-    }),
-  );
-
-  return submissions
-    .filter((s): s is Submission => s !== null && s.githubId === githubId)
-    .sort((a, b) => b.createdAt - a.createdAt)
+  const loaded = await Promise.all(Array.from(byId.values()).map(loadSubmission));
+  const mine = loaded
+    .filter((l): l is { created: StoredCreated; sub: Submission } => l !== null && l.created.githubId === githubId)
+    .sort((a, b) => b.created.createdAt - a.created.createdAt)
     .slice(0, limit);
+  const subs = await Promise.all(mine.map(withReconcile));
+  return subs.filter((s): s is Submission => s !== null);
 }
 
 // --- Callback replay protection: one marker per nonce, first write wins

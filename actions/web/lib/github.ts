@@ -1,4 +1,6 @@
+import { inflateRawSync } from 'node:zlib';
 import { config } from './config';
+import type { GradeResult } from './types';
 
 const API = 'https://api.github.com';
 
@@ -58,4 +60,71 @@ export async function dispatchGrade(payload: {
   if (!res.ok) {
     throw new Error(`dispatchGrade: GitHub API ${res.status}: ${await res.text()}`);
   }
+}
+
+// Recovery path for a result whose callback never landed (see store.ts
+// reconcile): the grade job uploads its result.json as the artifact
+// `result-<submission_id>` — the exact file the report job POSTs — so read it
+// back from the grader repo. Needs Actions read access on the service token;
+// any failure just means "not recoverable yet".
+export async function fetchGraderResult(submissionId: string): Promise<GradeResult | null> {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(submissionId)) return null;
+  const repo = `${API}/repos/${config.graderRepoOwner}/${config.graderRepoName}`;
+  const res = await fetch(`${repo}/actions/artifacts?name=result-${submissionId}&per_page=5`, {
+    headers: headers(),
+    cache: 'no-store',
+  });
+  if (!res.ok) return null;
+  const { artifacts } = (await res.json()) as {
+    artifacts: { archive_download_url: string; expired: boolean }[];
+  };
+  const artifact = artifacts.find((a) => !a.expired);
+  if (!artifact) return null;
+
+  // The download endpoint redirects to signed blob storage; follow it by hand
+  // so the GitHub token is never sent to that other host.
+  const redirect = await fetch(artifact.archive_download_url, {
+    headers: headers(),
+    redirect: 'manual',
+    cache: 'no-store',
+  });
+  const location = redirect.headers.get('location');
+  const zipRes = location ? await fetch(location, { cache: 'no-store' }) : redirect;
+  if (!zipRes.ok) return null;
+  const json = readZipEntry(Buffer.from(await zipRes.arrayBuffer()), 'result.json');
+  return json ? (JSON.parse(json.toString('utf8')) as GradeResult) : null;
+}
+
+// Minimal zip reader for the one small file inside an Actions artifact:
+// walk the central directory, then inflate (or copy) that entry's data.
+function readZipEntry(zip: Buffer, name: string): Buffer | null {
+  let eocd = -1;
+  for (let i = zip.length - 22; i >= Math.max(0, zip.length - 22 - 65535); i--) {
+    if (zip.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  const count = zip.readUInt16LE(eocd + 10);
+  let p = zip.readUInt32LE(eocd + 16);
+  for (let n = 0; n < count; n++) {
+    if (zip.readUInt32LE(p) !== 0x02014b50) return null;
+    const method = zip.readUInt16LE(p + 10);
+    const compSize = zip.readUInt32LE(p + 20);
+    const nameLen = zip.readUInt16LE(p + 28);
+    const extraLen = zip.readUInt16LE(p + 30);
+    const commentLen = zip.readUInt16LE(p + 32);
+    const local = zip.readUInt32LE(p + 42);
+    const entryName = zip.toString('utf8', p + 46, p + 46 + nameLen);
+    if (entryName === name) {
+      const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+      const data = zip.subarray(start, start + compSize);
+      if (method === 0) return data;
+      if (method === 8) return inflateRawSync(data);
+      return null;
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
 }

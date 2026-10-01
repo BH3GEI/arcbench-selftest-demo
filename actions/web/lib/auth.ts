@@ -23,6 +23,9 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   session: { strategy: 'jwt' },
+  // NextAuth's built-in sign-in/error pages are unstyled English; both land
+  // on the site's own page instead (it reads ?error= to explain what failed).
+  pages: { signIn: '/auth/signin', error: '/auth/signin' },
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
