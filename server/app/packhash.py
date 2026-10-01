@@ -4,6 +4,7 @@ ran against the exact same pack."""
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 
@@ -21,12 +22,12 @@ def pack_hash(pack_dir: Path) -> str:
 
 
 def count_tests(pack_dir: Path) -> int:
-    """Best-effort count of `test(...)` declarations in the pack."""
+    """Best-effort count of `test` declarations in the pack."""
     total = 0
     for path in pack_dir.rglob("*"):
         if path.suffix in (".ts", ".js") and path.is_file():
             try:
-                total += path.read_text(encoding="utf-8", errors="replace").count("test(")
+                total += len(re.findall(r"\btest\b", path.read_text(encoding="utf-8", errors="replace")))
             except OSError:
                 continue
     return total

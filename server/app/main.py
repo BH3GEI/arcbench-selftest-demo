@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
@@ -22,7 +23,12 @@ log = logging.getLogger("selftest")
 
 def get_evaluator(cfg: Config) -> LocalDockerEvaluator:
     """Integration seam: return the platform's evaluator here instead of
-    LocalDockerEvaluator to reuse the existing arcbench runner."""
+    LocalDockerEvaluator to reuse the existing arcbench runner. Set
+    SELFTEST_EVALUATOR=arcbench to use the run_submission.py adapter
+    (see runner_arcbench.py and INTEGRATION.md)."""
+    if os.environ.get("SELFTEST_EVALUATOR", "local") == "arcbench":
+        from .runner_arcbench import ArcbenchRunnerEvaluator
+        return ArcbenchRunnerEvaluator(cfg)
     return LocalDockerEvaluator(cfg, DockerOps(cfg))
 
 
