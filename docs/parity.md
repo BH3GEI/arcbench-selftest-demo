@@ -110,10 +110,18 @@ verification and are worth a maintainer's attention:
 
 ## 5. Verification
 
-Ran against the live server channel (`docker build` + `docker run`, no
-`docker compose` plugin available in this environment, equivalent flags),
-all against the shared `tasks/demo-todo` (5 tests — see note below) and
-`tasks/demo-todo-hidden` (same tests, `visibility: hidden`):
+Local Docker/colima use was later forbidden on the development machine
+(see note below); all Docker-based verification now runs via a
+`workflow_dispatch` GitHub Actions workflow in the **private** repo
+`BH3GEI/arcbench-grader-demo` (`.github/workflows/server-parity-verify.yml`,
+deliberately not in this public repo — this repo stays CI-free). That
+workflow checks out this repo, brings up the server channel with
+`docker compose up -d --build` (the real `api`+`worker` split topology —
+see §4), and drives it with `cli/selftest.py` against the shared
+`tasks/demo-todo` (5 tests — see note below) and `tasks/demo-todo-hidden`
+(same tests, `visibility: hidden`). Confirmed run:
+[`arcbench-grader-demo` run 36917908555](https://github.com/BH3GEI/arcbench-grader-demo/actions/runs/36917908555),
+2026-10-01, after landing the Chromium-sandbox fallback (§6):
 
 | App | Task | Expected | Got |
 |---|---|---|---|
@@ -125,6 +133,16 @@ all against the shared `tasks/demo-todo` (5 tests — see note below) and
 This matches the Actions channel's own verified-run pattern in
 `actions/README_ACTIONS.md` (good app all-pass, broken app mostly-fail with
 error text, hidden task reduced to pass/total) using the same test pack.
+
+Earlier runs of this same workflow failed for three unrelated infra reasons,
+each root-caused from Actions logs/artifacts alone (no local Docker access):
+the worker image's `docker.io` apt package left no `docker` CLI binary on
+`PATH` at runtime (switched to the official static CLI tarball from
+`download.docker.com`, see worker Dockerfile); Playwright's browser install
+path wasn't readable after the `gosu`-based privilege drop (fixed via a
+fixed `PLAYWRIGHT_BROWSERS_PATH`); and Chromium's own sandbox needs
+unprivileged user namespaces that GitHub's `ubuntu-latest` disables by
+default — see §6 for how that was resolved.
 
 **Note on the test pack**: `tasks/demo-todo` was unified to the full 5-test
 pack (`examples/tests/todo.spec.js`'s tests, same conventions, `.ts` instead
@@ -157,6 +175,22 @@ what survived and why:
   is hidden," which is what both the lead's requirement and arcbench's own
   task format need. `apply_visibility()` still masks hidden results to
   exactly `{status, passed, total}`.
+- **Chromium sandbox in the runner container**: both channels initially set
+  `chromiumSandbox: true` (Playwright's default) alongside the non-root
+  `node`/`gosu` user already in place. Verifying on real GitHub Actions
+  runners surfaced a literal `FATAL: ... No usable sandbox!` Chromium zygote
+  failure — GitHub's `ubuntu-latest` (Ubuntu 24.04, same restriction class
+  as Ubuntu 23.10+) disables unprivileged user namespaces by default via
+  AppArmor, which Chromium's own sandbox requires. `--security-opt
+  apparmor=unconfined` on the runner container was tried next and produced
+  the identical failure on a second verification run, proving it does not
+  restore the capability in this environment. Landed on `chromiumSandbox:
+  false` (Chromium's own suggested workaround) in both
+  `runner/playwright.config.js` and
+  `actions/template/runner/playwright.config.js` as the deliberate,
+  tested fallback — non-root user, the internal no-internet network, and
+  `no-new-privileges` remain as defense-in-depth that doesn't depend on
+  this one layer. Full detail in `docs/security-review.md` (open item #3).
 - **Everything orthogonal was kept from both sides**: dev-mode auth gated
   behind `SELFTEST_ALLOW_ANY_TOKEN` (rather than always trusting an
   unconfigured server), screenshot-artifact serving restricted to paths
