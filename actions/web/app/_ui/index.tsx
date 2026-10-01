@@ -35,7 +35,7 @@ const STATUS_META: Record<string, { label: string; tone: string; live?: boolean 
   passed: { label: '全部通过', tone: 'badge-success' },
   failed: { label: '部分未通过', tone: 'badge-danger' },
   error: { label: '运行出错', tone: 'badge-warning' },
-  system_error: { label: '系统出错 · 不计次数', tone: 'badge-warning' },
+  system_error: { label: '系统出错·不计次', tone: 'badge-warning' },
 };
 
 export function StatusBadge({ status }: { status: UiStatus }) {

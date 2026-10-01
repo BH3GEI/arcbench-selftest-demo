@@ -1067,7 +1067,7 @@ a.card-link:hover {
 }
 .list-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) 120px minmax(120px, 1fr) 150px 20px;
+  grid-template-columns: minmax(0, 1.3fr) 140px minmax(140px, 1fr) 130px 20px;
   align-items: center;
   gap: var(--s-4);
   padding: var(--s-4) var(--s-5);

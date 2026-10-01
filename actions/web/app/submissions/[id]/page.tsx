@@ -87,7 +87,9 @@ function Score({ s }: { s: Submission }) {
         <span className="card-title" style={{ margin: 0 }}>
           通过测试
         </span>
-        <StatusBadge status={effectiveStatus(s)} />
+        <span className={`subtle ${all ? 'tone-success' : ''}`}>
+          {all ? '全部通过' : `${r.total - r.passed} 条未通过`}
+        </span>
       </div>
       <div className="score-num">
         <span className={`n ${all ? 'tone-success' : ''}`}>{r.passed}</span>
