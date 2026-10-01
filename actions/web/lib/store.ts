@@ -110,6 +110,19 @@ export async function listUserSubmissions(githubId: string, limit = 50): Promise
     .slice(0, limit);
 }
 
+// --- Callback replay protection: one marker per nonce, first write wins
+// (put() without allowOverwrite rejects a path that already exists). ---
+
+export async function claimCallbackNonce(nonce: string): Promise<boolean> {
+  const path = `state/callback-nonces/${nonce}.json`;
+  try {
+    await put(path, '1', { access: 'public', addRandomSuffix: false, contentType: 'application/json' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // --- Quota: same append-only, list()-counted approach (see module doc). ---
 
 function today(): string {

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { del } from '@vercel/blob';
 import { verifyCallbackSignature } from '@/lib/signature';
-import { getSubmission, recordResult } from '@/lib/store';
+import { getSubmission, recordResult, claimCallbackNonce } from '@/lib/store';
 import type { GradeResult } from '@/lib/types';
 
 // Receives the grader's result (scripts/report_back.py POSTs here when
@@ -10,8 +10,13 @@ import type { GradeResult } from '@/lib/types';
 export async function POST(req: Request) {
   const rawBody = await req.text();
   const signature = req.headers.get('x-signature');
-  if (!verifyCallbackSignature(rawBody, signature)) {
+  const timestamp = req.headers.get('x-timestamp');
+  const nonce = req.headers.get('x-nonce');
+  if (!verifyCallbackSignature(rawBody, timestamp, nonce, signature)) {
     return NextResponse.json({ error: 'bad signature' }, { status: 401 });
+  }
+  if (nonce && !(await claimCallbackNonce(nonce))) {
+    return NextResponse.json({ error: 'replayed callback' }, { status: 409 });
   }
 
   let result: GradeResult;
