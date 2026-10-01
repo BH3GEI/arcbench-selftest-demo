@@ -8,17 +8,18 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from common.resultshape import apply_visibility
 from common.taskspec import TaskError
 
-from .auth import AuthError, VisibilityError, assert_can_view, build_authenticator
+from .auth import SESSION_COOKIE, AuthError, VisibilityError, assert_can_view, build_authenticator
 from .config import Config, load
 from .docker_ops import DockerOps
 from .jobs import JobService, QueueFull
 from .logging_setup import configure as configure_logging
+from .oauth_github import build_router as build_github_router
 from .quota import Quota, QuotaExceeded
 from .runner import LocalDockerEvaluator
 from .store import Store
@@ -44,18 +45,36 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
     store = Store(cfg.data_dir)
     quota = Quota(cfg.data_dir / "quota.db", cfg.daily_limit)
     authenticator = build_authenticator(cfg)
-    service = service or JobService(cfg, store, quota, get_evaluator(cfg))
+    # role="api": no Docker socket needed or touched by this process at all —
+    # a separate role="worker" process drains the queue (see server/app/worker.py).
+    service = service or JobService(cfg, store, quota, None if cfg.role == "api" else get_evaluator(cfg))
 
     app = FastAPI(title="arcbench self-test demo", version="0.1.0")
+    if cfg.auth_mode == "github":
+        app.include_router(build_github_router(cfg))
     _stop_retention = threading.Event()
+
+    if cfg.force_https:
+        @app.middleware("http")
+        async def _require_https(request: Request, call_next):
+            # Trusts X-Forwarded-Proto, so this only makes sense behind a
+            # reverse proxy that sets it itself (deploy/Caddyfile,
+            # deploy/nginx.conf.example) — never expose this process
+            # directly to the internet (docs/security-review.md item #9).
+            proto = request.headers.get("x-forwarded-proto", "https")
+            if proto != "https":
+                return Response("HTTPS required", status_code=400)
+            return await call_next(request)
 
     @app.on_event("startup")
     def _startup() -> None:
-        # Remove labeled leftovers from earlier runs (crash recovery).
-        try:
-            DockerOps(cfg).janitor()
-        except Exception as exc:
-            log.warning("startup janitor skipped: %s", exc)
+        # Remove labeled leftovers from earlier runs (crash recovery). Not
+        # this process's job in the split: it never created any containers.
+        if cfg.role != "api":
+            try:
+                DockerOps(cfg).janitor()
+            except Exception as exc:
+                log.warning("startup janitor skipped: %s", exc)
 
         if cfg.retention_hours > 0:
             def _retention_loop() -> None:
@@ -72,14 +91,17 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
     def _shutdown() -> None:
         _stop_retention.set()
 
-    def team_of(token: str | None) -> str:
+    def team_of(x_team_token: str | None, session: str | None) -> str:
+        # Exactly one of these is ever meaningful for a given auth_mode:
+        # the header for token/hmac clients (CLI, API), the cookie for
+        # github (browser login) — see server/app/oauth_github.py.
         try:
-            return authenticator.authenticate(token)
+            return authenticator.authenticate(x_team_token or session)
         except AuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc))
 
-    def owned(sub_id: str, token: str | None) -> tuple[dict, str]:
-        team = team_of(token)
+    def owned(sub_id: str, x_team_token: str | None, session: str | None) -> tuple[dict, str]:
+        team = team_of(x_team_token, session)
         sub = store.get(sub_id)
         if not sub:
             raise HTTPException(status_code=404, detail="unknown submission id")
@@ -93,6 +115,11 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
     def health(deep: bool = False) -> dict:
         if not deep:
             return {"ok": True}
+        if cfg.role == "api":
+            # This process never touches Docker by design (see worker.py);
+            # a Docker check here would just report the socket it correctly
+            # doesn't have.
+            return {"ok": True, "docker": "n/a (role=api, see worker.py)"}
         # deep=true also checks the Docker daemon the evaluator depends on —
         # useful for an orchestrator readiness probe, not just liveness.
         try:
@@ -102,12 +129,14 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
         return {"ok": bool(docker_ok), "docker": bool(docker_ok)}
 
     @app.get("/api/quota")
-    def get_quota(x_team_token: str | None = Header(default=None)) -> dict:
-        return quota.status(team_of(x_team_token))
+    def get_quota(x_team_token: str | None = Header(default=None),
+                 session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+        return quota.status(team_of(x_team_token, session))
 
     @app.get("/api/submissions")
-    def list_submissions(x_team_token: str | None = Header(default=None)) -> list[dict]:
-        return store.list_for_team(team_of(x_team_token))
+    def list_submissions(x_team_token: str | None = Header(default=None),
+                        session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> list[dict]:
+        return store.list_for_team(team_of(x_team_token, session))
 
     def no_sniff(resp: FileResponse) -> FileResponse:
         resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -115,8 +144,9 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
 
     @app.post("/api/submissions", status_code=202)
     async def submit(file: UploadFile = File(...), task_id: str = Form(...),
-                     x_team_token: str | None = Header(default=None)) -> JSONResponse:
-        team = team_of(x_team_token)
+                     x_team_token: str | None = Header(default=None),
+                     session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> JSONResponse:
+        team = team_of(x_team_token, session)
         # Read in chunks and stop at the cap instead of buffering any size.
         limit = cfg.max_zip_mb * 1024 * 1024
         chunks, size = [], 0
@@ -139,8 +169,9 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
         return JSONResponse({"id": sub_id, "status": "queued"}, status_code=202)
 
     @app.get("/api/submissions/{sub_id}")
-    def get_submission(sub_id: str, x_team_token: str | None = Header(default=None)) -> dict:
-        sub, _ = owned(sub_id, x_team_token)
+    def get_submission(sub_id: str, x_team_token: str | None = Header(default=None),
+                       session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+        sub, _ = owned(sub_id, x_team_token, session)
         payload = {"id": sub["id"], "status": sub["status"], "task_id": sub["task_id"],
                    "created_at": sub["created_at"], "updated_at": sub["updated_at"]}
         result = store.load_result(sub_id)
@@ -157,8 +188,11 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
     @app.get("/api/submissions/{sub_id}/logs/{kind}")
     def get_log(sub_id: str, kind: str,
                 x_team_token: str | None = Header(default=None),
-                token: str | None = Query(default=None)) -> FileResponse:
-        owned(sub_id, x_team_token or token)
+                session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> FileResponse:
+        # No query-string token fallback (docs/security-review.md item #8):
+        # it ends up in access logs, browser history, and Referer headers.
+        # Browser clients authenticate via the session cookie instead.
+        owned(sub_id, x_team_token, session)
         if _is_hidden(sub_id):
             raise HTTPException(status_code=404, detail="log not available for this task")
         if kind not in ("app", "runner"):
@@ -171,8 +205,8 @@ def create_app(cfg: Config | None = None, service: JobService | None = None) -> 
     @app.get("/api/submissions/{sub_id}/artifact")
     def get_artifact(sub_id: str, path: str,
                      x_team_token: str | None = Header(default=None),
-                     token: str | None = Query(default=None)) -> FileResponse:
-        owned(sub_id, x_team_token or token)
+                     session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> FileResponse:
+        owned(sub_id, x_team_token, session)
         # Only screenshots named in the result are served. The results dir
         # also holds report.json and Playwright's output/ (error-context
         # files quote the test source), which must not be downloadable.

@@ -8,4 +8,7 @@ echo "[runner] probing $BASE_URL (timeout ${READY_TIMEOUT:-60}s)"
 node /opt/selftest/wait-ready.mjs || exit 3
 
 echo "[runner] app ready, running pack at ${PACK_TEST_DIR:-/pack}"
+# Already running as the image's unprivileged `node` user (Dockerfile's
+# USER node) for the whole entrypoint, not just this step — Chromium's own
+# sandbox stays on too (chromiumSandbox: true in playwright.config.js).
 exec npx playwright test --config=/opt/selftest/playwright.config.js

@@ -15,6 +15,14 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN npm install -g @playwright/test@${PLAYWRIGHT_VERSION} && npm cache clean --force
 RUN npx playwright install --with-deps chromium
 
+# gosu: drop root before the step that actually launches Chromium against
+# participant-controlled pages, so a browser sandbox escape lands as this
+# unprivileged user, not root. Official Debian package, not a third-party
+# binary fetch.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r runner && useradd -r -g runner -m -d /home/runner runner
+
 COPY playwright.config.js wait-ready.mjs run.sh /opt/selftest/
 RUN chmod +x /opt/selftest/run.sh
 

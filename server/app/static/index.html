@@ -22,8 +22,10 @@
 <p class="muted">上传已构建的 app（含 Dockerfile 的 zip），几分钟后得到逐条测试结果。结果仅提交者本人可见，不影响正式成绩。</p>
 
 <div class="card">
+  <a href="/auth/github/login">用 GitHub 登录</a>
+  <span class="muted">（或用队伍 token，二选一）</span>
   <label>队伍 token</label>
-  <input id="token" size="30" placeholder="demo-token">
+  <input id="token" size="30" placeholder="仅 token 模式需要">
   <span id="quota"></span>
 </div>
 
@@ -42,10 +44,16 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const tokenInput = $('token');
-tokenInput.value = localStorage.getItem('selftest-token') || 'demo-token';
+// Left blank for GitHub-login mode (SELFTEST_AUTH_MODE=github): the session
+// cookie fetch() sends automatically does the job, and an X-Team-Token
+// header — even a leftover placeholder value — would wrongly take priority
+// over it (server/app/main.py's team_of()).
+tokenInput.value = localStorage.getItem('selftest-token') || '';
 tokenInput.onchange = () => { localStorage.setItem('selftest-token', tokenInput.value); refresh(); };
 
-function headers() { return { 'X-Team-Token': tokenInput.value }; }
+function headers() {
+  return tokenInput.value ? { 'X-Team-Token': tokenInput.value } : {};
+}
 
 async function api(path, opts) {
   const res = await fetch(path, { headers: headers(), ...opts });
@@ -97,6 +105,19 @@ async function poll(id) {
   }
 }
 
+// Screenshots load via fetch() (same auth as every other call: the
+// X-Team-Token header, or the session cookie fetch() sends automatically
+// for GitHub-login mode) + an object URL, not a plain <img src> with the
+// token in the query string — that leaks into access logs, browser
+// history, and Referer headers (docs/security-review.md item #8).
+async function loadShot(img, path, subId) {
+  try {
+    const res = await fetch(`/api/submissions/${subId}/artifact?path=${encodeURIComponent(path)}`, { headers: headers() });
+    if (!res.ok) return;
+    img.src = URL.createObjectURL(await res.blob());
+  } catch {}
+}
+
 function render(rec) {
   const r = rec.result || {};
   const div = document.createElement('div');
@@ -104,14 +125,20 @@ function render(rec) {
   let html = `<b>${rec.id}</b> — <span class="${r.failed ? 'fail' : 'pass'}">${rec.status}</span>
     <div class="muted">通过率 ${r.pass_rate ?? '-'}%（${r.passed ?? 0}/${r.total ?? 0}）· 测试包哈希 ${String(r.pack_hash || '').slice(0, 16)}… · 用时 ${r.duration_s ?? '-'}s</div>`;
   if (r.detail) html += `<pre>${escapeHtml(r.detail)}</pre>`;
+  const shots = [];
   for (const t of r.tests || []) {
     html += `<div class="${t.ok ? 'pass' : 'fail'}">${t.ok ? '✓' : '✗'} ${escapeHtml(t.title)}</div>`;
     if (!t.ok && t.error) html += `<pre>${escapeHtml(t.error.split('\n').slice(0, 6).join('\n'))}</pre>`;
-    if (!t.ok && t.screenshot) html += `<img class="shot" src="/api/submissions/${rec.id}/artifact?path=${encodeURIComponent(t.screenshot)}&token=${encodeURIComponent(tokenInput.value)}">`;
+    if (!t.ok && t.screenshot) {
+      const shotId = `shot-${shots.length}-${Math.random().toString(36).slice(2)}`;
+      shots.push({ shotId, path: t.screenshot });
+      html += `<img class="shot" id="${shotId}">`;
+    }
   }
   if (r.app_log) html += `<details><summary>app 日志</summary><pre>${escapeHtml(r.app_log)}</pre></details>`;
   div.innerHTML = html;
   document.body.appendChild(div);
+  for (const { shotId, path } of shots) loadShot(div.querySelector(`#${shotId}`), path, rec.id);
   $('msg').textContent = '';
   div.scrollIntoView({ behavior: 'smooth' });
 }

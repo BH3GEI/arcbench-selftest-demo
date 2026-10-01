@@ -12,5 +12,9 @@ module.exports = {
     headless: true,
     baseURL: process.env.BASE_URL,
     screenshot: 'only-on-failure',
+    // Explicit, not just relying on Playwright's default: never disable the
+    // browser's own sandbox even though we also run as a non-root user
+    // (run.sh) and restrict the mount to this task's own tests only.
+    launchOptions: { chromiumSandbox: true },
   },
 };

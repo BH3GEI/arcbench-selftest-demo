@@ -102,8 +102,11 @@ class LocalDockerEvaluator:
             # 0. runner image, built lazily from runner/ on first use
             self.ops.ensure_runner_image()
             # 1. isolated build with a wall-clock timeout (per-task, from requirements.yaml)
+            # and resource caps, so a hostile Dockerfile can't fork-bomb or
+            # OOM the build host.
             self.ops.build_image(app_src, image, network_mode=cfg.build_network,
-                                 timeout_s=task.build_timeout_s)
+                                 timeout_s=task.build_timeout_s,
+                                 mem_limit=cfg.build_mem, cpus=cfg.build_cpus)
             # 2. fresh internal network (no internet) + fresh container
             self.ops.create_network(net_name, job_id)
             app_container = self.ops.run_app(image, app_name, net_name, job_id, task.app_port)

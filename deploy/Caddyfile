@@ -13,7 +13,7 @@ selftest.example.com {
 		max_size 100MB
 	}
 
-	reverse_proxy server:8080 {
+	reverse_proxy api:8080 {
 		# Builds can run long; don't let the proxy time out a submission
 		# the server is still legitimately working on.
 		transport http {

@@ -13,6 +13,12 @@ mkdir -p /work
 ln -sfn "$(npm root -g)" /work/node_modules
 rm -rf /work/pack
 cp -r /pack /work/pack
+chown -R runner:runner /work /results 2>/dev/null || true
 
 echo "[runner] app ready, running pack"
-exec npx playwright test --config=/opt/selftest/playwright.config.js
+# Drop root before the step that actually launches Chromium against
+# participant-controlled pages: a browser sandbox escape then lands as
+# this unprivileged user, not root. Sandbox itself stays on (no
+# --no-sandbox / chromiumSandbox:false anywhere in playwright.config.js).
+export HOME=/home/runner
+exec gosu runner npx playwright test --config=/opt/selftest/playwright.config.js

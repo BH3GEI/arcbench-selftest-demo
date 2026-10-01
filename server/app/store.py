@@ -26,6 +26,11 @@ class Store:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(data_dir / "selftest.db", check_same_thread=False)
+        # The api/worker split (docs/security-review.md open item #1) has two
+        # separate OS processes sharing this file; give SQLite's own file
+        # locking a few seconds to resolve a writer collision instead of
+        # raising "database is locked" immediately.
+        self._db.execute("PRAGMA busy_timeout = 5000")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS submissions ("
             "id TEXT PRIMARY KEY, team TEXT NOT NULL, task_id TEXT NOT NULL, status TEXT NOT NULL, "
@@ -71,6 +76,38 @@ class Store:
             {"id": r[0], "team": r[1], "task_id": r[2], "status": r[3], "created_at": r[4], "updated_at": r[5]}
             for r in rows
         ]
+
+    def count_active(self) -> int:
+        """Submissions not yet in a terminal state — queued, building, or
+        running — across however many processes share this store (the
+        api/worker split means that's not just this process's own count)."""
+        row = self._db.execute(
+            "SELECT COUNT(*) FROM submissions WHERE status IN ('queued', 'building', 'running')"
+        ).fetchone()
+        return row[0]
+
+    def claim_next_queued(self) -> tuple[str, str] | None:
+        """Atomically take the oldest queued submission (id, task_id), or
+        None if there isn't one. For the standalone worker process
+        (server/app/worker.py); safe if multiple worker processes call this
+        against the same SQLite file — the UPDATE's WHERE guard means only
+        one of them actually claims a given row, SQLite's own file locking
+        serializes the race."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id, task_id FROM submissions WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            sub_id, task_id = row
+            cur = self._db.execute(
+                "UPDATE submissions SET status = 'building', updated_at = ? WHERE id = ? AND status = 'queued'",
+                (time.time(), sub_id),
+            )
+            self._db.commit()
+            if cur.rowcount == 0:
+                return None  # another worker claimed it first
+            return sub_id, task_id
 
     # ------------------------------------------------------------------ files
     def submission_dir(self, sub_id: str) -> Path:

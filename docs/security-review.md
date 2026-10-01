@@ -33,37 +33,65 @@ special skill; **Medium** = DoS or needs a second weakness; **Low** = hygiene.
 | F18 | Medium | Actions | Open item #7 (partial — grader side): the outbound callback signed only the raw body, so a captured POST could be replayed indefinitely within the signature's lifetime. | `report_back.py` now signs `"{timestamp}.{nonce}.{sha256(body)}"` and sends `X-Timestamp`/`X-Nonce`/`X-Signature`. The grader is stateless across runs, so the nonce-dedup *store* has to live on the receiver (documented in `actions/README_ACTIONS.md` "Callback verification" as a contract for the self-test/web side — not implemented there by this pass). |
 | F19 | — | Actions | New: a download failure, a runner-harness crash, or (by contract) a dispatch stuck in the Actions queue were all indistinguishable from the participant's own app failing — no way for the self-test service to retry fairly or avoid charging quota for an infra hiccup. | Introduced a `status` vocabulary (`passed`/`failed`/`system_error`/`rejected`) through `grade.sh` → `parse_report.py` → `result.json`; `grade.sh` also retries a runner-harness crash (no report produced, not a decided app-fault exit code) once before reporting `system_error`. Contract documented in `actions/README_ACTIONS.md` "Result fields": `system_error` should be retried once and never charged against the daily quota; `rejected` should not be retried. |
 
+## Addressed in a later pass (2026-10-01)
+
+| # | Open item (below) | What changed |
+|---|---|---|
+| 1 | Docker socket on the internet-facing process | **Split, not eliminated** — `SELFTEST_ROLE=api`\|`worker` (`server/app/config.py`, `server/app/jobs.py`, new `server/app/worker.py`). The `api` process serves HTTP and never imports/constructs `DockerOps`; `compose.yml`'s default topology is now two services — `api` (no Docker socket, `127.0.0.1`-only port) and `worker` (has the socket, no exposed port at all). A compromise of `api` no longer gets the socket for free. This is *not* the stronger recommendation (separate VM / gVisor / socket proxy) — still open if that level of isolation is needed. |
+| 2 | Build timeout doesn't stop the build | `DockerOps.build_image` now shells out to the `docker` CLI via `subprocess.run(..., timeout=...)` instead of the SDK's `images.build()` (which only stopped *our wait*, not the daemon's work — confirmed by reading how `images.build()` blocks until the whole build finishes before returning anything to iterate). Killing the CLI on timeout drops its connection to the daemon, which aborts the build with it — the same mechanism `grade.sh` already used. Also added `--memory`/`--memory-swap`/`--cpu-quota` on the build itself (`SELFTEST_BUILD_MEM`/`BUILD_CPUS`), not just the resulting container. |
+| 3 (partial) | Runner/Chromium isolation | The runner (`runner/Dockerfile`, `actions/template/runner/Dockerfile`) now drops to a non-root user via `gosu` for the step that actually launches Chromium against participant-controlled pages, and `playwright.config.js` sets `chromiumSandbox: true` explicitly rather than relying on the default. "Mount only the current task's tests" was already true before this pass (`host_tests_dir = host_tasks_dir/task_id/tests`, not the whole tasks tree) as a side effect of the task-format parity work in `docs/parity.md`. Not done: a seccomp profile tuned for the sandbox, or isolating the runner on its own disposable host. |
+| 8 | Token in query string | Removed the `?token=` fallback from `/logs/{kind}` and `/artifact` entirely (`server/app/main.py`) — callers authenticate via `X-Team-Token` or, in `github` auth mode, the session cookie (sent automatically by the browser, including for plain `fetch()`/`<img>` loads — `server/app/static/index.html` now fetches screenshots via `fetch()` + object URL instead of a `src=...&token=...` URL). |
+| 9 (partial) | No TLS, port on all interfaces | `compose.yml`'s `api` service now binds `127.0.0.1:8080` instead of `0.0.0.0:8080`; `SELFTEST_FORCE_HTTPS=1` adds a middleware that 400s any request a reverse proxy reports as plain HTTP and marks the session/state cookies `Secure`. Still needs an actual reverse proxy in front for a real deployment — `deploy/Caddyfile`/`deploy/nginx.conf.example` were already present (prior pass). |
+| — | Auth was team-token-only | Added `SELFTEST_AUTH_MODE=github` (`server/app/oauth_github.py`, `server/app/auth.py`'s `GitHubCookieAuth`) per a product decision to run the server's participant-facing login as GitHub OAuth, matching `actions/web/`'s identity (GitHub numeric account id) so quota means the same thing on both channels. Session cookie is a small stdlib-only signed payload (`sign_session`/`verify_session`, HMAC-SHA256, no third-party crypto dependency), httponly, `Secure` under `SELFTEST_FORCE_HTTPS`. The GitHub access token is used once server-side to fetch the profile, then discarded — never put in the cookie. |
+
+Re-ran the full test suite after each change (`pytest`, no Docker needed) —
+see `docs/parity.md` for the Docker-based end-to-end verification, which per
+a later decision now runs in GitHub Actions on the private grader repo
+rather than on this machine.
+
 ## Open items (larger changes, not done here)
 
 ### Critical / High
 
 1. **Server holds the host Docker socket and builds untrusted Dockerfiles on
-   the host daemon** (`compose.yml`). Any code execution in the API process
-   = root on the host, and every participant build/run shares the host
-   kernel. Recommendation: run builds and app containers on a separate
+   the host daemon** (`compose.yml`). ~~Any code execution in the API
+   process = root on the host~~ — **partially addressed**: the Docker
+   socket is no longer mounted into the internet-facing process at all, only
+   into a separate `worker` process with no exposed port
+   (`SELFTEST_ROLE=api`|`worker`). Every participant build/run still shares
+   the host kernel (no per-job VM or sandboxed container runtime yet).
+   Recommendation, still open: run builds and app containers on a separate
    disposable VM (or one VM per job); use a sandboxed runtime for app and
    runner containers (`--runtime=runsc` gVisor, or Kata); if the socket must
-   stay, front it with a socket proxy that only allows the build/create/
-   start/logs/remove calls; run the API container as non-root.
+   stay on a process at all, front it with a socket proxy that only allows
+   the build/create/start/logs/remove calls.
 2. ~~**Build step has no resource limits and the timeout does not stop
-   it.**~~ Fixed for the Actions channel — see F17. `DockerOps.build_image`
-   on the **server/** (self-hosted docker-compose) channel still has this
-   exact gap (checks the timeout only when a log line arrives, then just
-   stops reading while the daemon keeps building) and remains open there:
-   build with `docker buildx build` in a subprocess killed on timeout (or a
-   per-job builder container), pass memory/CPU limits, put Docker's data
-   root on a size-limited volume and prune builder cache after each job,
-   pre-pull an allowlist of base images and reject other `FROM` lines or
-   run the daemon without registry access during builds.
+   it.**~~ **Fixed on both channels**: Actions — see F17
+   (`DOCKER_BUILDKIT=1` + `--kill-after`/`--signal` + memory/CPU caps +
+   cache pruning). Server — `DockerOps.build_image` now shells out to
+   `docker build` via `subprocess.run(..., timeout=...)` instead of the
+   SDK's `images.build()` (confirmed by reading the SDK source that it
+   blocks until the *entire* build finishes before returning anything to
+   iterate, so the old timeout check only ever stopped our own wait, never
+   the daemon's work); also added build-time `--memory`/`--cpu-quota`
+   (`SELFTEST_BUILD_MEM`/`BUILD_CPUS`). Still open on both: Docker's data
+   root isn't on a size-limited volume, no base-image allowlist.
 3. ~~**The runner container holds the whole test pack while its Chromium
-   loads participant-controlled pages.**~~ Fixed for the Actions channel —
-   see F16 (non-root runner, sandbox engaged; the mount was already scoped
-   to the current task only). The **server/** channel's runner still
-   launches Chromium as root; apply the same non-root fix there, plus
-   `--read-only` root with tmpfs and a current Playwright/Chromium pin.
+   loads participant-controlled pages.**~~ **Fixed on both channels**:
+   Actions — see F16 (runs as the image's unprivileged `node` user). Server
+   — `runner/Dockerfile` now drops to a non-root user via `gosu` for the
+   step that actually launches Chromium; both channels set
+   `chromiumSandbox: true` explicitly. The mount was already scoped to just
+   the current task's tests on both channels (never the whole pack tree),
+   a side effect of the task-format parity work (`docs/parity.md`). Still
+   open: a seccomp profile tuned for the sandbox; `/results` is necessarily
+   still writable by the non-root user (that's where the report/screenshots
+   get written) — the boundary that matters is that it's no longer root
+   doing the writing.
 4. ~~**GITHUB_TOKEN has `contents: write` in the same job that builds and
    runs untrusted code.**~~ Fixed — see F15 (`prepare`/`grade`/`report`
-   split). Third-party actions (`actions/checkout`, `actions/upload-` /
+   split). No equivalent concept on the server channel (no `GITHUB_TOKEN`
+   there). Third-party actions (`actions/checkout`, `actions/upload-`/
    `download-artifact`) are still pinned by tag, not commit SHA — low
    severity (official GitHub-authored actions) but worth doing before a
    real production launch.
@@ -90,13 +118,16 @@ special skill; **Medium** = DoS or needs a second weakness; **Low** = hygiene.
    persist seen nonces — not implemented in this repo, since the grader is
    stateless across runs; take the callback URL from a repo variable rather
    than the payload once that lands.
-8. **Token in query string** (`?token=` for screenshots/logs) ends up in
-   access logs, browser history and Referer. Recommendation: short-lived
-   signed URLs per artifact, or an HttpOnly SameSite cookie session.
-9. **No TLS; port published on all interfaces.** Recommendation: bind
-   `127.0.0.1:8080` in compose and terminate TLS at a reverse proxy; add
-   `Content-Security-Policy: default-src 'self'` and `Referrer-Policy:
-   no-referrer` to the UI.
+8. ~~**Token in query string** (`?token=` for screenshots/logs) ends up in
+   access logs, browser history and Referer.~~ **Fixed** — the `?token=`
+   fallback is gone from the server's `/logs`/`/artifact` endpoints; browser
+   clients use the `github`-mode session cookie (an HttpOnly SameSite cookie
+   session, exactly the recommended fix) instead.
+9. ~~**No TLS; port published on all interfaces.**~~ **Partially fixed** —
+   `compose.yml`'s `api` service binds `127.0.0.1:8080` instead of
+   `0.0.0.0`, and `SELFTEST_FORCE_HTTPS=1` rejects any request a reverse
+   proxy reports as plain HTTP. Still open: no
+   `Content-Security-Policy`/`Referrer-Policy` headers on the UI yet.
 10. **Static team tokens, no rate limit on failed auth or on GET endpoints.**
     Recommendation: ≥128-bit random tokens, rotation procedure, per-IP rate
     limit on 401s and polling.

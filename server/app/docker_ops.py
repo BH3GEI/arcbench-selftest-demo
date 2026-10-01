@@ -5,6 +5,7 @@ crash: `janitor` removes leftovers on startup."""
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -50,26 +51,33 @@ class DockerOps:
         log.info("building runner image %s from %s", self.cfg.runner_image, ctx)
         self.build_image(ctx, self.cfg.runner_image, network_mode=None, timeout_s=1800)
 
-    def build_image(self, context: Path, tag: str, network_mode: str | None, timeout_s: int) -> None:
-        started = time.monotonic()
+    def build_image(self, context: Path, tag: str, network_mode: str | None, timeout_s: int,
+                    mem_limit: str | None = None, cpus: float | None = None) -> None:
+        """Shells out to the `docker` CLI rather than the SDK's
+        `images.build()`: that call already blocks until the daemon finishes
+        the *entire* build before returning anything to iterate, so checking
+        elapsed time against the returned log lines never actually stops a
+        build that's still running — only our own wait for it. A real
+        subprocess with `timeout=` kills the CLI client on expiry, which
+        drops its connection to the daemon and aborts the build with it, the
+        same mechanism `actions/template/scripts/grade.sh` already relies on
+        (`timeout "$BUILD_TIMEOUT_S" docker build ...`)."""
+        cmd = ["docker", "build", "--rm", "--force-rm", "-t", tag]
+        if network_mode:
+            cmd.append(f"--network={network_mode}")
+        if mem_limit:
+            cmd += [f"--memory={mem_limit}", f"--memory-swap={mem_limit}"]
+        if cpus:
+            cmd += ["--cpu-period=100000", f"--cpu-quota={int(cpus * 100000)}"]
+        cmd += ["--label", f"{self.cfg.label}=build", str(context)]
         try:
-            _, logs = self.client.images.build(
-                path=str(context),
-                tag=tag,
-                rm=True,
-                forcerm=True,
-                network_mode=network_mode,
-                labels={self.cfg.label: "build"},
-            )
-            for chunk in logs:
-                if time.monotonic() - started > timeout_s:
-                    raise BuildError(f"docker build exceeded {timeout_s}s")
-                if "error" in chunk:
-                    raise BuildError(str(chunk["error"])[:500])
-        except BuildError:
-            raise
-        except Exception as exc:  # docker.errors.BuildError and friends
-            raise BuildError(str(exc)[:500]) from exc
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise BuildError(f"docker build exceeded {timeout_s}s") from exc
+        except OSError as exc:
+            raise BuildError(f"could not run docker build: {exc}") from exc
+        if proc.returncode != 0:
+            raise BuildError((proc.stderr or proc.stdout or "docker build failed").strip()[-2000:])
 
     # ------------------------------------------------------------------ networks
     def create_network(self, name: str, job_id: str) -> str:
