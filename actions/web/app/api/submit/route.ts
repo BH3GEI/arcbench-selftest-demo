@@ -4,6 +4,7 @@ import { put } from '@vercel/blob';
 import { getCurrentUser, accountTooNew } from '@/lib/session';
 import { config } from '@/lib/config';
 import { taskExists, dispatchGrade } from '@/lib/github';
+import { isTaskListed } from '@/lib/taskVisibility';
 import { signDispatch } from '@/lib/signature';
 import {
   createSubmission,
@@ -33,7 +34,7 @@ export async function POST(req: Request) {
   if (!taskId || !(file instanceof Blob)) {
     return NextResponse.json({ error: 'taskId and file are required' }, { status: 400 });
   }
-  if (!(await taskExists(taskId))) {
+  if (!isTaskListed(taskId) || !(await taskExists(taskId))) {
     return NextResponse.json({ error: 'unknown task' }, { status: 400 });
   }
 

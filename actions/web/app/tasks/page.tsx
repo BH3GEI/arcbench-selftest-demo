@@ -5,16 +5,18 @@ import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import { Icon, Notice, RequireAuth, zhError } from '../_ui';
 
+type Task = { id: string; displayName: string };
+
 function TaskList() {
   const { status } = useSession();
-  const [taskIds, setTaskIds] = useState<string[] | null>(null);
+  const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (status !== 'authenticated') return;
     fetch('/api/tasks')
       .then((r) => r.json())
-      .then((d) => (d.error ? setError(zhError(d.error)) : setTaskIds(d.taskIds)))
+      .then((d) => (d.error ? setError(zhError(d.error)) : setTasks(d.tasks)))
       .catch((e) => setError(String(e)));
   }, [status]);
 
@@ -33,7 +35,7 @@ function TaskList() {
         </Notice>
       )}
 
-      {!taskIds && !error && (
+      {!tasks && !error && (
         <div className="grid" aria-busy="true">
           {[0, 1, 2].map((i) => (
             <div key={i} className="skeleton" style={{ height: 120 }} />
@@ -41,7 +43,7 @@ function TaskList() {
         </div>
       )}
 
-      {taskIds && taskIds.length === 0 && (
+      {tasks && tasks.length === 0 && (
         <div className="card empty">
           <span className="icon">
             <Icon.file />
@@ -51,15 +53,15 @@ function TaskList() {
         </div>
       )}
 
-      {taskIds && taskIds.length > 0 && (
+      {tasks && tasks.length > 0 && (
         <ul className="grid" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {taskIds.map((id) => (
-            <li key={id}>
-              <Link href={`/submit/${encodeURIComponent(id)}`} className="card card-link stack" style={{ gap: 'var(--s-3)' }}>
+          {tasks.map((task) => (
+            <li key={task.id}>
+              <Link href={`/submit/${encodeURIComponent(task.id)}`} className="card card-link stack" style={{ gap: 'var(--s-3)' }}>
                 <span className="fact-icon">
                   <Icon.file />
                 </span>
-                <span style={{ fontWeight: 650, fontSize: 'var(--fs-lg)', overflowWrap: 'anywhere' }}>{id}</span>
+                <span style={{ fontWeight: 650, fontSize: 'var(--fs-lg)', overflowWrap: 'anywhere' }}>{task.displayName}</span>
                 <span className="row subtle" style={{ gap: 'var(--s-1)' }}>
                   上传并自测 <Icon.chevron size={14} />
                 </span>

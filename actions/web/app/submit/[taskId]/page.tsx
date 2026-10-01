@@ -5,6 +5,7 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Icon, MAX_ZIP_MB, Notice, QuotaCard, RequireAuth, useSubmissions, zhError } from '../../_ui';
+import { taskDisplayName } from '@/lib/taskVisibility';
 
 function formatSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -73,7 +74,7 @@ function SubmitForm({ taskId }: { taskId: string }) {
           <p className="subtle">
             <Link href="/tasks">选择题目</Link> / 上传
           </p>
-          <h1 style={{ marginTop: 'var(--s-1)', overflowWrap: 'anywhere' }}>{taskId}</h1>
+          <h1 style={{ marginTop: 'var(--s-1)', overflowWrap: 'anywhere' }}>{taskDisplayName(taskId)}</h1>
           <p className="sub">上传 app 的 zip 包，系统会在正式评测环境中构建并运行这道题的测试。</p>
         </div>
       </div>
