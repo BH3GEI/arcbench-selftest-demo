@@ -5,7 +5,13 @@ import { getCurrentUser, accountTooNew } from '@/lib/session';
 import { config } from '@/lib/config';
 import { taskExists, dispatchGrade } from '@/lib/github';
 import { signDispatch } from '@/lib/signature';
-import { saveSubmission, tryConsumeUserQuota, tryConsumeGlobalQuota, releaseUserQuota } from '@/lib/store';
+import {
+  saveSubmission,
+  tryConsumeUserQuota,
+  tryConsumeGlobalQuota,
+  releaseUserQuota,
+  releaseGlobalQuota,
+} from '@/lib/store';
 import type { Submission } from '@/lib/types';
 
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
@@ -40,16 +46,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'not a zip file' }, { status: 400 });
   }
 
-  const userOk = await tryConsumeUserQuota(user.githubId, config.dailyLimitPerUser);
-  if (!userOk) {
+  const userQuota = await tryConsumeUserQuota(user.githubId, config.dailyLimitPerUser);
+  if (!userQuota.ok) {
     return NextResponse.json(
       { error: `daily submission limit reached (${config.dailyLimitPerUser}/day)` },
       { status: 429 },
     );
   }
-  const globalOk = await tryConsumeGlobalQuota(config.dailyLimitGlobal);
-  if (!globalOk) {
-    await releaseUserQuota(user.githubId);
+  const globalQuota = await tryConsumeGlobalQuota(config.dailyLimitGlobal);
+  if (!globalQuota.ok) {
+    await releaseUserQuota(userQuota.markerPath);
     return NextResponse.json(
       { error: 'the site has reached its overall daily submission limit, try again tomorrow' },
       { status: 429 },
@@ -66,7 +72,8 @@ export async function POST(req: Request) {
     });
     blobUrl = blob.url;
   } catch (err) {
-    await releaseUserQuota(user.githubId);
+    await releaseUserQuota(userQuota.markerPath);
+    await releaseGlobalQuota(globalQuota.markerPath);
     return NextResponse.json({ error: `upload failed: ${String(err)}` }, { status: 502 });
   }
 
@@ -78,6 +85,8 @@ export async function POST(req: Request) {
   try {
     await dispatchGrade({ submissionId, taskId, downloadUrl: blobUrl, callbackUrl, timestamp, signature });
   } catch (err) {
+    await releaseUserQuota(userQuota.markerPath);
+    await releaseGlobalQuota(globalQuota.markerPath);
     return NextResponse.json({ error: `could not start grading: ${String(err)}` }, { status: 502 });
   }
 

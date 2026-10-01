@@ -1,17 +1,27 @@
-import { put, head, list } from '@vercel/blob';
+import { randomUUID } from 'node:crypto';
+import { put, head, list, del } from '@vercel/blob';
 import type { Submission } from './types';
 
 // Vercel KV turned out to need a marketplace integration with an
 // interactive "accept terms" step (no non-interactive provisioning path),
 // so all app state — not just the submitted zips — lives in Vercel Blob
-// instead: one JSON object per submission, one per quota counter. Paths use
-// an unguessable UUID (submissions) or a predictable-but-not-sensitive key
-// (quota counters), and are world-readable (Blob's "public" access) but not
-// listable without the project's write token — acceptable at this scale.
-// Known limitation: read-modify-write quota increments aren't atomic like a
-// real KV INCR would be, so a rare race under heavy concurrent submissions
-// from the same user could let one or two extra requests through. Fine for
-// a self-test tool; swap for a proper counter if that ever matters.
+// instead.
+//
+// Submissions: one JSON object per submission at an unguessable UUID path,
+// overwritten in place as status changes. Public access, but not listable
+// without the project's write token — acceptable at this scale.
+//
+// Quota: NOT a read-modify-write counter on a single overwritten blob —
+// public Blob URLs sit behind a CDN that does not reliably reflect an
+// overwrite on the very next read (confirmed empirically: a counter
+// written and immediately re-read came back stale, under-counting and
+// defeating the limit entirely). Instead each consumed submission writes
+// its own small marker blob under a per-user-per-day (or per-day, for the
+// global limit) prefix, and the check is "how many markers exist under
+// this prefix" via list(), which hits the Blob index rather than a cached
+// per-URL CDN response — the same list() call listUserSubmissions() already
+// relies on, observed consistent in practice. Release (the compensating
+// decrement when the *other* quota check fails) deletes that one marker.
 
 function submissionPath(id: string): string {
   return `state/submissions/${id}.json`;
@@ -50,57 +60,54 @@ export async function listUserSubmissions(githubId: string, limit = 50): Promise
     .slice(0, limit);
 }
 
-function quotaPath(scope: string, date: string): string {
-  return `state/quota/${scope}/${date}.json`;
-}
-
-async function readCount(path: string): Promise<number> {
-  try {
-    const info = await head(path);
-    const data = await fetchJson<{ count: number }>(info.url);
-    return data?.count ?? 0;
-  } catch {
-    return 0;
-  }
-}
-
-async function writeCount(path: string, count: number): Promise<void> {
-  await put(path, JSON.stringify({ count }), {
-    access: 'public',
-    addRandomSuffix: false,
-    contentType: 'application/json',
-    allowOverwrite: true,
-  });
-}
-
 function today(): string {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD, UTC
 }
 
-export async function tryConsumeUserQuota(githubId: string, limit: number): Promise<boolean> {
-  const path = quotaPath(`user-${githubId}`, today());
-  const current = await readCount(path);
-  if (current >= limit) return false;
-  await writeCount(path, current + 1);
-  return true;
+function quotaPrefix(scope: string): string {
+  return `state/quota/${scope}/${today()}/`;
 }
 
-export async function releaseUserQuota(githubId: string): Promise<void> {
-  const path = quotaPath(`user-${githubId}`, today());
-  const current = await readCount(path);
-  await writeCount(path, Math.max(0, current - 1));
+async function countMarkers(prefix: string): Promise<number> {
+  const { blobs } = await list({ prefix });
+  return blobs.length;
 }
 
-export async function tryConsumeGlobalQuota(limit: number): Promise<boolean> {
-  const path = quotaPath('global', today());
-  const current = await readCount(path);
-  if (current >= limit) return false;
-  await writeCount(path, current + 1);
-  return true;
+async function addMarker(prefix: string): Promise<string> {
+  const path = `${prefix}${randomUUID()}.json`;
+  await put(path, '1', { access: 'public', addRandomSuffix: false, contentType: 'application/json' });
+  return path;
 }
 
-export async function releaseGlobalQuota(): Promise<void> {
-  const path = quotaPath('global', today());
-  const current = await readCount(path);
-  await writeCount(path, Math.max(0, current - 1));
+async function removeMarker(path: string | null): Promise<void> {
+  if (!path) return;
+  try {
+    await del(path);
+  } catch {
+    // best-effort — a leftover marker just makes that one slot look used
+  }
+}
+
+export type QuotaConsumption = { ok: boolean; markerPath: string | null };
+
+export async function tryConsumeUserQuota(githubId: string, limit: number): Promise<QuotaConsumption> {
+  const prefix = quotaPrefix(`user-${githubId}`);
+  const current = await countMarkers(prefix);
+  if (current >= limit) return { ok: false, markerPath: null };
+  return { ok: true, markerPath: await addMarker(prefix) };
+}
+
+export async function releaseUserQuota(markerPath: string | null): Promise<void> {
+  await removeMarker(markerPath);
+}
+
+export async function tryConsumeGlobalQuota(limit: number): Promise<QuotaConsumption> {
+  const prefix = quotaPrefix('global');
+  const current = await countMarkers(prefix);
+  if (current >= limit) return { ok: false, markerPath: null };
+  return { ok: true, markerPath: await addMarker(prefix) };
+}
+
+export async function releaseGlobalQuota(markerPath: string | null): Promise<void> {
+  await removeMarker(markerPath);
 }
