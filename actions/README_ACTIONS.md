@@ -1,11 +1,10 @@
 # GitHub Actions grader
 
-The recommended evaluation channel for the self-test demo: serverless, built
-on GitHub Actions instead of this repo's local `docker compose` server (still
-available, see the repo's root README, as an alternative for anyone who wants
-to self-host). Task content and test packs live in a **separate private
-repository**; this public repo only ships the template used to create that
-private repo, plus this guide.
+A serverless evaluation channel for the self-test demo, built on GitHub
+Actions — an alternative to this repo's local `docker compose` server (see
+the repo's root README for both). Task content and test packs live in a
+**separate private repository**; this public repo only ships the template
+used to create that private repo, plus this guide.
 
 Nothing in `actions/` (workflow, scripts, the `demo-todo` example task) is
 task content for a real competition — `demo-todo` reuses the same public
