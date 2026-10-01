@@ -6,13 +6,13 @@ import { config } from '@/lib/config';
 import { taskExists, dispatchGrade } from '@/lib/github';
 import { signDispatch } from '@/lib/signature';
 import {
-  saveSubmission,
+  createSubmission,
+  recordResult,
   tryConsumeUserQuota,
   tryConsumeGlobalQuota,
   releaseUserQuota,
   releaseGlobalQuota,
 } from '@/lib/store';
-import type { Submission } from '@/lib/types';
 
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
 
@@ -77,6 +77,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `upload failed: ${String(err)}` }, { status: 502 });
   }
 
+  // Written *before* dispatching: the grader can finish and call back
+  // faster than you'd expect, and the callback looks this record up by id
+  // — it must already exist.
+  const now = Date.now();
+  await createSubmission({
+    id: submissionId,
+    githubId: user.githubId,
+    githubLogin: user.githubLogin,
+    taskId,
+    createdAt: now,
+    status: 'queued',
+    updatedAt: now,
+    result: null,
+  });
+
   const baseUrl = process.env.NEXTAUTH_URL || new URL(req.url).origin;
   const callbackUrl = `${baseUrl}/api/callback`;
   const timestamp = Math.floor(Date.now() / 1000);
@@ -87,21 +102,17 @@ export async function POST(req: Request) {
   } catch (err) {
     await releaseUserQuota(userQuota.markerPath);
     await releaseGlobalQuota(globalQuota.markerPath);
+    await recordResult(submissionId, {
+      submission_id: submissionId,
+      task_id: taskId,
+      visibility: 'public',
+      status: 'error',
+      passed: 0,
+      total: 0,
+      detail: `could not start grading: ${String(err)}`,
+    });
     return NextResponse.json({ error: `could not start grading: ${String(err)}` }, { status: 502 });
   }
-
-  const now = Date.now();
-  const submission: Submission = {
-    id: submissionId,
-    githubId: user.githubId,
-    githubLogin: user.githubLogin,
-    taskId,
-    status: 'queued',
-    createdAt: now,
-    updatedAt: now,
-    result: null,
-  };
-  await saveSubmission(submission);
 
   return NextResponse.json({ id: submissionId });
 }

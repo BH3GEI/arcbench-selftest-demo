@@ -1,38 +1,55 @@
 import { randomUUID } from 'node:crypto';
-import { put, head, list, del } from '@vercel/blob';
-import type { Submission } from './types';
+import { put, list, del } from '@vercel/blob';
+import type { Submission, GradeResult, SubmissionStatus } from './types';
 
 // Vercel KV turned out to need a marketplace integration with an
 // interactive "accept terms" step (no non-interactive provisioning path),
-// so all app state — not just the submitted zips — lives in Vercel Blob
-// instead.
+// so all app state lives in Vercel Blob instead. That came with a sharp
+// edge, found by testing (not by inspection): public Blob URLs sit behind
+// a CDN that does NOT reliably reflect an overwrite (`allowOverwrite`) on
+// the very next read. A quota counter that wrote-then-read-back the same
+// URL silently under-counted forever (fixed — see tryConsumeUserQuota).
+// The submission record had the identical bug: the grader's result
+// callback overwrote `state/submissions/<id>.json`, returned 200, and the
+// participant's poll kept reading the pre-overwrite ("queued") version
+// indefinitely.
 //
-// Submissions: one JSON object per submission at an unguessable UUID path,
-// overwritten in place as status changes. Public access, but not listable
-// without the project's write token — acceptable at this scale.
-//
-// Quota: NOT a read-modify-write counter on a single overwritten blob —
-// public Blob URLs sit behind a CDN that does not reliably reflect an
-// overwrite on the very next read (confirmed empirically: a counter
-// written and immediately re-read came back stale, under-counting and
-// defeating the limit entirely). Instead each consumed submission writes
-// its own small marker blob under a per-user-per-day (or per-day, for the
-// global limit) prefix, and the check is "how many markers exist under
-// this prefix" via list(), which hits the Blob index rather than a cached
-// per-URL CDN response — the same list() call listUserSubmissions() already
-// relies on, observed consistent in practice. Release (the compensating
-// decrement when the *other* quota check fails) deletes that one marker.
+// Fix, applied uniformly: never overwrite a blob. Each submission is a
+// small append-only set of objects under `state/submissions/<id>/` —
+// `created.json` written once at submit time, `result.json` written once
+// (if at all) by the callback — and reads always go through list() (which
+// behaved consistently in testing, same as it already did for
+// listUserSubmissions) rather than re-fetching a URL that might have been
+// written to since it was first cached.
 
-function submissionPath(id: string): string {
-  return `state/submissions/${id}.json`;
+function submissionDir(id: string): string {
+  return `state/submissions/${id}/`;
 }
 
-export async function saveSubmission(sub: Submission): Promise<void> {
-  await put(submissionPath(sub.id), JSON.stringify(sub), {
+type StoredCreated = Omit<Submission, 'status' | 'result' | 'updatedAt'>;
+type StoredResult = { status: SubmissionStatus; result: GradeResult; updatedAt: number };
+
+export async function createSubmission(sub: Submission): Promise<void> {
+  const created: StoredCreated = {
+    id: sub.id,
+    githubId: sub.githubId,
+    githubLogin: sub.githubLogin,
+    taskId: sub.taskId,
+    createdAt: sub.createdAt,
+  };
+  await put(`${submissionDir(sub.id)}created.json`, JSON.stringify(created), {
     access: 'public',
     addRandomSuffix: false,
     contentType: 'application/json',
-    allowOverwrite: true,
+  });
+}
+
+export async function recordResult(id: string, result: GradeResult): Promise<void> {
+  const payload: StoredResult = { status: result.status, result, updatedAt: Date.now() };
+  await put(`${submissionDir(id)}result.json`, JSON.stringify(payload), {
+    access: 'public',
+    addRandomSuffix: false,
+    contentType: 'application/json',
   });
 }
 
@@ -42,23 +59,58 @@ async function fetchJson<T>(url: string): Promise<T | null> {
   return (await res.json()) as T;
 }
 
+function assembleSubmission(created: StoredCreated, result: StoredResult | null): Submission {
+  return {
+    ...created,
+    status: result?.status ?? 'queued',
+    result: result?.result ?? null,
+    updatedAt: result?.updatedAt ?? created.createdAt,
+  };
+}
+
 export async function getSubmission(id: string): Promise<Submission | null> {
-  try {
-    const info = await head(submissionPath(id));
-    return await fetchJson<Submission>(info.url);
-  } catch {
-    return null;
-  }
+  const { blobs } = await list({ prefix: submissionDir(id) });
+  const createdBlob = blobs.find((b) => b.pathname.endsWith('/created.json'));
+  if (!createdBlob) return null;
+  const resultBlob = blobs.find((b) => b.pathname.endsWith('/result.json'));
+  const [created, result] = await Promise.all([
+    fetchJson<StoredCreated>(createdBlob.url),
+    resultBlob ? fetchJson<StoredResult>(resultBlob.url) : Promise.resolve(null),
+  ]);
+  if (!created) return null;
+  return assembleSubmission(created, result);
 }
 
 export async function listUserSubmissions(githubId: string, limit = 50): Promise<Submission[]> {
   const { blobs } = await list({ prefix: 'state/submissions/' });
-  const all = await Promise.all(blobs.map((b) => fetchJson<Submission>(b.url)));
-  return all
+  const byId = new Map<string, { created?: string; result?: string }>();
+  for (const b of blobs) {
+    const rest = b.pathname.slice('state/submissions/'.length);
+    const [id, file] = rest.split('/');
+    if (!id || !file) continue;
+    const entry = byId.get(id) ?? {};
+    if (file === 'created.json') entry.created = b.url;
+    if (file === 'result.json') entry.result = b.url;
+    byId.set(id, entry);
+  }
+
+  const submissions = await Promise.all(
+    Array.from(byId.values()).map(async ({ created, result }) => {
+      if (!created) return null;
+      const c = await fetchJson<StoredCreated>(created);
+      if (!c) return null;
+      const r = result ? await fetchJson<StoredResult>(result) : null;
+      return assembleSubmission(c, r);
+    }),
+  );
+
+  return submissions
     .filter((s): s is Submission => s !== null && s.githubId === githubId)
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, limit);
 }
+
+// --- Quota: same append-only, list()-counted approach (see module doc). ---
 
 function today(): string {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD, UTC

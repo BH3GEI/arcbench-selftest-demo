@@ -231,17 +231,44 @@ dispatched; an unknown account-creation date fails *open* (doesn't block),
 since the GitHub API field is self-reported, optional and not worth hard-
 failing legitimate users over.
 
-**Known limitations**: quota counters are read-modify-write on Blob JSON,
-not atomic like a real counter — a rare race under heavy concurrent
-submissions from the same account could let one or two extra through, not
-a correctness issue at this scale. No Vercel KV (see above). The service
-token used for the grader repo (listing tasks, dispatching) needs the same
-least-privilege scoping called out in "Secrets & least privilege" — it
-currently reuses a broad personal token for this verification, replace
-before real production use. No rate limiting on the API routes themselves
-beyond the quota checks (a participant could hammer `/api/submissions`
-freely; harmless since it's read-only and scoped to their own data, but
-worth a note).
+Quota is **not** a read-modify-write counter on one overwritten Blob object
+— that was the first implementation, and it was broken: public Blob URLs
+sit behind a CDN that does not reliably reflect an overwrite on the very
+next read, so a write-then-read-back check silently under-counted and let
+every submission through regardless of the limit (caught by testing the
+boundary directly, not by inspection — see "Verified run"). Fixed by
+writing one small marker blob per consumed submission under a per-user
+(or, for the global limit) per-day prefix, and counting via `list()`
+instead of reading a single URL — the same `list()` call the submission
+history already relied on, which behaved consistently. Verified: the 11th
+same-day submission from one account is rejected with 429, the 10th is
+not.
+
+The same CDN-staleness bug hit submission status too: the grader's result
+callback used to overwrite `state/submissions/<id>.json`, got HTTP 200 back,
+and the participant's poll kept reading the pre-overwrite "queued" version
+indefinitely — found by actually polling a real submission through to
+completion, not by inspection. Fixed the same way: a submission is now an
+append-only pair of objects, `state/submissions/<id>/created.json` (written
+once at submit time) and `.../result.json` (written once by the callback,
+if at all), assembled on read via `list()` rather than re-fetching a URL
+that might have changed since it was first cached. Also moved the
+submission record's creation to *before* the grader is dispatched (it used
+to happen after) — the grader can call back faster than that write used to
+land, and the callback looks the record up by id.
+
+**Known limitations**: the list-then-write quota check still isn't a true
+atomic increment — a race under heavy *concurrent* submissions from the
+same account in the same instant could let one or two extra through. Not
+a correctness issue at the scale this targets, and strictly better than
+the original counter (which enforced nothing at all). No Vercel KV (see
+above). The service token used for the grader repo (listing tasks,
+dispatching) needs the same least-privilege scoping called out in "Secrets
+& least privilege" — it currently reuses a broad personal token for this
+verification, replace before real production use. No rate limiting on the
+API routes themselves beyond the quota checks (a participant could hammer
+`/api/submissions` freely; harmless since it's read-only and scoped to
+their own data, but worth a note).
 
 ## Submitter identity & quota
 

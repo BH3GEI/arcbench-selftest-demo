@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { del } from '@vercel/blob';
 import { verifyCallbackSignature } from '@/lib/signature';
-import { getSubmission, saveSubmission } from '@/lib/store';
+import { getSubmission, recordResult } from '@/lib/store';
 import type { GradeResult } from '@/lib/types';
 
 // Receives the grader's result (scripts/report_back.py POSTs here when
@@ -26,10 +26,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'unknown submission' }, { status: 404 });
   }
 
-  existing.status = result.status;
-  existing.result = result;
-  existing.updatedAt = Date.now();
-  await saveSubmission(existing);
+  await recordResult(existing.id, result);
 
   // Best-effort cleanup: the app zip has no further use once grading is done.
   try {
