@@ -1,0 +1,10 @@
+# Flat key: value pairs on purpose — scripts/grade.sh parses this file with
+# grep/cut (no YAML library in the Actions runner), so keep it one level deep.
+# If a task needs nested structure, see README_ACTIONS.md for the parser swap.
+task_id: demo-todo
+title: Todo app
+visibility: public
+app_port: 3000
+build_timeout_s: 600
+ready_timeout_s: 60
+run_timeout_s: 900
