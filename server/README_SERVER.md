@@ -191,9 +191,27 @@ against the real arcbench runner, lives in `server/app/config.py`.
 
 ## Real run results
 
-待补 — results from a real deployment run against the demo apps
-(`examples/app-todo`, `examples/app-todo-broken`, `examples/app-todo-partial`)
-will be added here once that run has been captured. In the meantime,
-`scripts/e2e-demo.sh` exercises the same four scenarios
-(pass / fail / partial score / over-quota rejection) against any running
-stack and prints pass/fail for each.
+Captured 2026-10-01 on a local deployment (colima, Docker 29.5.2, arm64),
+pack `examples/tests/` (5 tests, hash `4fdf3851aac8655e…`), daily limit set
+to 3 to demo the rejection path. Each row is one
+`cli/selftest.py submit <app> --wait` with token `demo-token`:
+
+| Scenario | Submission | Result | Exit code | Notes |
+|---|---|---|---|---|
+| Healthy app | `examples/app-todo` | **5/5 passed, 100%**, 4.7s | 0 | per-test PASS lines, status `done` |
+| Broken app | `examples/app-todo-broken` | **1/5 passed, 20%**, 244s | 1 | 4 failures, each with error text + failure screenshot (mislabeled button, tests hit the 60s timeout as expected) |
+| Partially finished app | `examples/app-todo-partial` | **3/5 passed, 60.0%**, 68.9s | 1 | passes heading/add+persist/multi-persist; fails empty-title error text and unimplemented delete |
+| Over-quota | 4th submission of the day | **HTTP 429** | 1 | `team 'demo' reached the daily limit of 3 submissions`; `quota` shows used=3, remaining=0 |
+
+Failure screenshots were retrieved end-to-end through
+`GET /api/submissions/{id}/artifact?path=…&token=…` (verified PNG, 1280×720);
+app and runner logs are served by `GET /api/submissions/{id}/logs/app|runner`.
+
+The quota logic is additionally covered by unit tests
+(`tests/test_quota.py`: per-team independence, limit rejection, day rollover;
+`tests/test_api.py` / `tests/test_api_flow.py`: HTTP-level 429 and
+results visible only to the submitting team).
+
+To reproduce: `SELFTEST_DAILY_LIMIT=3 docker compose up --build`, then
+`bash scripts/e2e-demo.sh` — it runs the same four scenarios in order and
+prints ok/MISS for each.

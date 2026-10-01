@@ -76,6 +76,10 @@ def parse_playwright_report(report_path: Path, results_dir: Path) -> tuple[list[
     def rel(path: str | None) -> str | None:
         if not path:
             return None
+        # Attachments carry container paths (/results/...); make them
+        # relative to the results dir so the artifact endpoint can serve them.
+        if path.startswith("/results/"):
+            return path[len("/results/"):]
         try:
             return str(Path(path).resolve().relative_to(results_dir.resolve()))
         except ValueError:
