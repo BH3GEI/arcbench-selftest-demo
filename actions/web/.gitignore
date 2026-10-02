@@ -5,3 +5,8 @@ node_modules/
 !.env.example
 *.log
 *.tsbuildinfo
+
+# e2e 回归检查
+e2e/report/
+e2e/test-results/
+.playwright-browsers/
