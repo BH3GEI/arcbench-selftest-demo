@@ -331,6 +331,30 @@ export async function typicalGradingSeconds(): Promise<number> {
   return seconds;
 }
 
+// --- Direct-to-Blob uploads: the browser PUTs the zip to a presigned URL
+// (Vercel functions cap request bodies at 4.5MB), so /api/upload-url first
+// records who may submit that upload id, for which task. /api/submit checks
+// this intent before charging quota. ---
+
+type UploadIntent = { id: string; githubId: string; taskId: string; createdAt: number };
+
+export async function createUploadIntent(intent: UploadIntent): Promise<void> {
+  await put(`state/uploads/${intent.id}.json`, JSON.stringify(intent), {
+    access: 'public',
+    addRandomSuffix: false,
+    contentType: 'application/json',
+  });
+}
+
+export async function readUploadIntent(id: string): Promise<UploadIntent | null> {
+  const { blobs } = await list({ prefix: `state/uploads/${id}.json` });
+  return blobs[0] ? fetchJson<UploadIntent>(blobs[0].url) : null;
+}
+
+export async function submissionExists(id: string): Promise<boolean> {
+  return Boolean((await urlsFor(id)).created);
+}
+
 // --- Callback replay protection: one marker per nonce, first write wins
 // (put() without allowOverwrite rejects a path that already exists). ---
 
@@ -372,6 +396,21 @@ async function removeMarker(path: string | null): Promise<void> {
   } catch {
     // best-effort — a leftover marker just makes that one slot look used
   }
+}
+
+/** Read-only check, so a participant out of quota isn't asked to upload first. */
+export async function quotaBlocked(
+  githubId: string,
+  userLimit: number,
+  globalLimit: number,
+): Promise<'user' | 'global' | null> {
+  const [user, global] = await Promise.all([
+    countMarkers(quotaPrefix(`user-${githubId}`)),
+    countMarkers(quotaPrefix('global')),
+  ]);
+  if (user >= userLimit) return 'user';
+  if (global >= globalLimit) return 'global';
+  return null;
 }
 
 export type QuotaConsumption = { ok: boolean; markerPath: string | null };

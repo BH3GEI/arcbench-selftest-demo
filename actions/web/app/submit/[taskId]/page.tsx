@@ -19,6 +19,27 @@ function checkFile(f: File): string | null {
   return null;
 }
 
+// 用 XHR 而不是 fetch：需要上传进度。
+function putWithProgress(url: string, file: File, onProgress: (pct: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.floor((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100);
+        resolve();
+      } else {
+        reject(new Error(`文件上传失败（${xhr.status}），请重试。`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('文件上传失败，请检查网络后重试。'));
+    xhr.send(file);
+  });
+}
+
 function SubmitForm({ taskId }: { taskId: string }) {
   const { status } = useSession();
   const router = useRouter();
@@ -26,6 +47,7 @@ function SubmitForm({ taskId }: { taskId: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -48,22 +70,34 @@ function SubmitForm({ taskId }: { taskId: string }) {
     e.preventDefault();
     if (!file) return;
     setBusy(true);
+    setProgress(0);
     setError(null);
     try {
-      const form = new FormData();
-      form.set('taskId', taskId);
-      form.set('file', file);
-      const res = await fetch('/api/submit', { method: 'POST', body: form });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(zhError(data.error || `上传失败（${res.status}）`));
-        setBusy(false);
-        return;
-      }
-      router.push(`/submissions/${data.id}`);
+      // 1) 申请上传地址（服务端先检查题目、大小和剩余次数，不扣次数）
+      const res1 = await fetch('/api/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId, size: file.size }),
+      });
+      const d1 = await res1.json().catch(() => ({}));
+      if (!res1.ok) throw new Error(zhError(d1.error || `上传失败（${res1.status}）`));
+
+      // 2) 浏览器直接把 zip 传到存储（不经过站点函数，支持到 50 MB）
+      await putWithProgress(d1.uploadUrl, file, setProgress);
+
+      // 3) 服务端复核文件后扣次数并开始评测
+      const res2 = await fetch('/api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId: d1.id }),
+      });
+      const d2 = await res2.json().catch(() => ({}));
+      if (!res2.ok) throw new Error(zhError(d2.error || `提交失败（${res2.status}）`));
+      router.push(`/submissions/${d2.id}`);
     } catch (err) {
-      setError(`网络错误：${String(err)}`);
+      setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -141,7 +175,8 @@ function SubmitForm({ taskId }: { taskId: string }) {
             <button className="btn btn-primary btn-lg" type="submit" disabled={!file || busy || outOfQuota}>
               {busy ? (
                 <>
-                  <span className="spinner" aria-hidden="true" /> 上传中
+                  <span className="spinner" aria-hidden="true" />{' '}
+                  {progress !== null && progress < 100 ? `上传中 ${progress}%` : '提交中'}
                 </>
               ) : (
                 '提交自测'

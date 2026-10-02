@@ -1,22 +1,26 @@
-import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
-import { put } from '@vercel/blob';
 import { getCurrentUser, accountTooNew } from '@/lib/session';
 import { config } from '@/lib/config';
-import { taskExists, dispatchGrade } from '@/lib/github';
-import { isTaskListed } from '@/lib/taskVisibility';
+import { dispatchGrade } from '@/lib/github';
 import { signDispatch } from '@/lib/signature';
+import { checkUploadedZip } from '@/lib/upload';
 import {
   createSubmission,
+  readUploadIntent,
   recordResult,
+  submissionExists,
   tryConsumeUserQuota,
   tryConsumeGlobalQuota,
   releaseUserQuota,
   releaseGlobalQuota,
 } from '@/lib/store';
 
-const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
+const UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const INTENT_MAX_AGE_MS = 60 * 60 * 1000;
 
+// Step 2 of a submission (step 1: /api/upload-url, then the browser PUTs the
+// zip straight to Blob). Verifies the upload belongs to this user and really
+// is a zip within the size cap, and only then charges quota and dispatches.
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: 'sign in required' }, { status: 401 });
@@ -28,24 +32,23 @@ export async function POST(req: Request) {
     );
   }
 
-  const form = await req.formData();
-  const taskId = String(form.get('taskId') || '');
-  const file = form.get('file');
-  if (!taskId || !(file instanceof Blob)) {
-    return NextResponse.json({ error: 'taskId and file are required' }, { status: 400 });
+  const body = (await req.json().catch(() => ({}))) as { uploadId?: unknown };
+  const submissionId = typeof body.uploadId === 'string' ? body.uploadId : '';
+  if (!UPLOAD_ID.test(submissionId)) {
+    return NextResponse.json({ error: 'uploadId is required' }, { status: 400 });
   }
-  if (!isTaskListed(taskId) || !(await taskExists(taskId))) {
-    return NextResponse.json({ error: 'unknown task' }, { status: 400 });
+  const intent = await readUploadIntent(submissionId);
+  if (!intent || intent.githubId !== user.githubId || Date.now() - intent.createdAt > INTENT_MAX_AGE_MS) {
+    return NextResponse.json({ error: 'upload not found' }, { status: 400 });
   }
+  if (await submissionExists(submissionId)) {
+    return NextResponse.json({ id: submissionId }); // double click / retry: already submitted
+  }
+  const taskId = intent.taskId;
 
-  const maxBytes = config.maxZipMb * 1024 * 1024;
-  if (file.size > maxBytes) {
-    return NextResponse.json({ error: `zip exceeds ${config.maxZipMb}MB` }, { status: 400 });
-  }
-  const head = Buffer.from(await file.slice(0, 4).arrayBuffer());
-  if (!head.equals(ZIP_MAGIC)) {
-    return NextResponse.json({ error: 'not a zip file' }, { status: 400 });
-  }
+  const upload = await checkUploadedZip(submissionId);
+  if (!upload.ok) return NextResponse.json({ error: upload.error }, { status: upload.status });
+  const blobUrl = upload.url;
 
   const userQuota = await tryConsumeUserQuota(user.githubId, config.dailyLimitPerUser);
   if (!userQuota.ok) {
@@ -63,38 +66,32 @@ export async function POST(req: Request) {
     );
   }
 
-  const submissionId = randomUUID();
-
-  let blobUrl: string;
-  try {
-    const blob = await put(`submissions/${submissionId}.zip`, file, {
-      access: 'public',
-      addRandomSuffix: false,
-    });
-    blobUrl = blob.url;
-  } catch (err) {
-    await releaseUserQuota(userQuota.markerPath);
-    await releaseGlobalQuota(globalQuota.markerPath);
-    return NextResponse.json({ error: `upload failed: ${String(err)}` }, { status: 502 });
-  }
-
   // Written *before* dispatching: the grader can finish and call back
   // faster than you'd expect, and the callback looks this record up by id
   // — it must already exist.
   const now = Date.now();
-  await createSubmission(
-    {
-      id: submissionId,
-      githubId: user.githubId,
-      githubLogin: user.githubLogin,
-      taskId,
-      createdAt: now,
-      status: 'queued',
-      updatedAt: now,
-      result: null,
-    },
-    [userQuota.markerPath, globalQuota.markerPath],
-  );
+  try {
+    await createSubmission(
+      {
+        id: submissionId,
+        githubId: user.githubId,
+        githubLogin: user.githubLogin,
+        taskId,
+        createdAt: now,
+        status: 'queued',
+        updatedAt: now,
+        result: null,
+      },
+      [userQuota.markerPath, globalQuota.markerPath],
+    );
+  } catch (err) {
+    // A concurrent submit of the same upload got there first (created.json is
+    // write-once): give this request's quota back and point at that one.
+    await releaseUserQuota(userQuota.markerPath);
+    await releaseGlobalQuota(globalQuota.markerPath);
+    if (await submissionExists(submissionId)) return NextResponse.json({ id: submissionId });
+    throw err;
+  }
 
   const baseUrl = process.env.NEXTAUTH_URL || new URL(req.url).origin;
   const callbackUrl = `${baseUrl}/api/callback`;

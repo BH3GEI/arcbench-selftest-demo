@@ -244,11 +244,23 @@ than worked around.
 per-GitHub-account daily submission limit (default 10), a separate global
 daily limit across all users (protects against runaway Actions spend, not
 just one user), a zip size cap, and a minimum-GitHub-account-age gate
-(rejects brand-new accounts, default 7 days, 0 disables it). All four are
-checked server-side in `/api/submit` before anything is uploaded or
-dispatched; an unknown account-creation date fails *open* (doesn't block),
-since the GitHub API field is self-reported, optional and not worth hard-
-failing legitimate users over.
+(rejects brand-new accounts, default 7 days, 0 disables it). An unknown
+account-creation date fails *open* (doesn't block), since the GitHub API
+field is self-reported, optional and not worth hard-failing legitimate users
+over.
+
+**Upload flow.** Vercel functions reject request bodies over 4.5MB, so the
+zip never passes through one: (1) `/api/upload-url` checks the account age,
+the task, the declared size and remaining quota (read-only), records an
+upload intent (`state/uploads/<id>.json`: who, which task) and returns a
+presigned Blob PUT URL for exactly `submissions/<id>.zip` — no overwrite,
+size cap and zip content types enforced by Blob itself, valid 15 minutes.
+It is issued with the project's OIDC Blob credentials (`issueSignedToken` +
+`presignUrl`), so no `BLOB_READ_WRITE_TOKEN` is needed. (2) The browser PUTs
+the file there. (3) `/api/submit {uploadId}` checks the intent belongs to
+this user, re-checks the stored object (size, `PK\x03\x04` magic; a bad
+object is deleted), and only then charges quota and dispatches. A zip that
+is uploaded but never submitted costs nothing but storage.
 
 Quota is **not** a read-modify-write counter on one overwritten Blob object
 — that was the first implementation, and it was broken: public Blob URLs

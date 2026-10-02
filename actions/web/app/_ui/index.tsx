@@ -133,6 +133,8 @@ const ERROR_ZH: [RegExp, string][] = [
   [/unknown task/i, '题目不存在。'],
   [/sign in required/i, '登录已失效，请重新登录。'],
   [/could not start grading|upload failed/i, '评测系统出错，本次不计次数，请稍后重试。'],
+  [/upload not found/i, '没有找到上传的文件，请重新选择文件提交。'],
+  [/empty file/i, '文件为空。'],
 ];
 
 export function zhError(msg: string) {
