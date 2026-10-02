@@ -391,7 +391,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
 
 /** 拉取当前用户的提交记录（历史页、上传页的剩余次数共用）。 */
 // 列表里有排队中/运行中的提交时，每隔这么久自动刷新一次。
-const LIST_POLL_MS = 10000;
+const LIST_POLL_MS = 60000;
 
 /** 拉取当前用户的提交记录（首页、历史页、上传页的剩余次数共用）。
  *  有未出结果的提交时自动轮询，切回页面时也会刷新，不会停在旧的「排队中」。 */

@@ -22,7 +22,7 @@ import {
   type UiStatus,
 } from '../../_ui';
 
-const POLL_MS = 4000;
+const POLL_MS = 60000;
 // 服务端没有给出 typicalSeconds（按近期真实提交统计）时的兜底值。
 const TYPICAL_SECONDS = 8 * 60;
 // 与服务端 store.ts 的 STALE_AFTER_MS 一致。
