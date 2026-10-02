@@ -4,6 +4,8 @@
 
 const DISPLAY_NAMES: Record<string, string> = {
   'github-stage-1-req-test': 'GitHub 题 · 第一阶段',
+  'github-stage-2-req-test': 'GitHub 题 · 第二阶段',
+  'github-stage-3-req-test': 'GitHub 题 · 第三阶段',
 };
 
 const UNLISTED_TASK_IDS = new Set<string>(['demo-todo', 'demo-todo-hidden']);
