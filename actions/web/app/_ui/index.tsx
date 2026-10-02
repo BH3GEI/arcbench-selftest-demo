@@ -62,9 +62,13 @@ export function systemErrorZh(detail: string): string {
   return '';
 }
 
-export function failureReason(detail: string | undefined): { title: string; hint: string } {
-  for (const [re, title, hint] of FAILURE_ZH) if (re.test(detail ?? '')) return { title, hint };
-  return { title: 'app 未能运行', hint: '镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。' };
+export function failureReason(detail: string | undefined): { title: string; hint: string; known: boolean } {
+  for (const [re, title, hint] of FAILURE_ZH) if (re.test(detail ?? '')) return { title, hint, known: true };
+  return {
+    title: 'app 未能运行',
+    hint: '镜像构建或启动失败，测试未执行。请检查 Dockerfile 和启动命令。',
+    known: false,
+  };
 }
 
 export function isPending(st: UiStatus) {

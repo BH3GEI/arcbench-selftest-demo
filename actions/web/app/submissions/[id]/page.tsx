@@ -325,6 +325,7 @@ function Detail({ id }: { id: string }) {
   const r = submission.result;
   const hidden = Boolean(r && (r.visibility === 'hidden' || !r.tests));
   const resubmit = `/submit/${encodeURIComponent(submission.taskId)}`;
+  const fr = r ? failureReason(r.detail) : null;
 
   return (
     <main id="main" className="wrap">
@@ -362,12 +363,12 @@ function Detail({ id }: { id: string }) {
         </section>
       )}
 
-      {st === 'not_run' && r && (
+      {st === 'not_run' && r && fr && (
         <section className="section stack">
-          <Notice tone="danger" title={failureReason(r.detail).title}>
-            {failureReason(r.detail).hint} 本次计入当日次数。
+          <Notice tone="danger" title={fr.title}>
+            {fr.hint} 本次计入当日次数。
           </Notice>
-          {r.detail && <RawDetail detail={r.detail} />}
+          {r.detail && !fr.known && <RawDetail detail={r.detail} />}
           <div>
             <Link href={resubmit} className="btn btn-primary">
               修改后重新提交
