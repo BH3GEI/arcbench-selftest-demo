@@ -382,6 +382,11 @@ export function RequireAuth({ children }: { children: ReactNode }) {
 }
 
 /** 拉取当前用户的提交记录（历史页、上传页的剩余次数共用）。 */
+// 列表里有排队中/运行中的提交时，每隔这么久自动刷新一次。
+const LIST_POLL_MS = 10000;
+
+/** 拉取当前用户的提交记录（首页、历史页、上传页的剩余次数共用）。
+ *  有未出结果的提交时自动轮询，切回页面时也会刷新，不会停在旧的「排队中」。 */
 export function useSubmissions(enabled: boolean) {
   const [subs, setSubs] = useState<Submission[] | null>(null);
   const [quota, setQuota] = useState<{ used: number; limit: number } | null>(null);
@@ -390,11 +395,20 @@ export function useSubmissions(enabled: boolean) {
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
-    fetch('/api/submissions', { cache: 'no-store' })
-      .then((r) => r.json())
-      .then((d) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function load() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      let pending = false;
+      try {
+        const d = await fetch('/api/submissions', { cache: 'no-store' }).then((r) => r.json());
         if (!alive) return;
-        if (d.error) return setError(zhError(d.error));
+        if (d.error) {
+          setError(zhError(d.error));
+          return;
+        }
+        setError(null);
         const list: Submission[] = (d.submissions ?? []).slice().sort(
           (a: Submission, b: Submission) => b.createdAt - a.createdAt,
         );
@@ -406,10 +420,29 @@ export function useSubmissions(enabled: boolean) {
         } else {
           setQuota({ used: usedToday(list), limit: DAILY_LIMIT });
         }
-      })
-      .catch((e) => alive && setError(String(e)));
+        pending = list.some((s) => isPending(effectiveStatus(s)));
+      } catch (e) {
+        if (!alive) return;
+        // 已有数据时，网络抖动不覆盖列表，下次轮询再试。
+        setSubs((prev) => {
+          if (!prev) setError(String(e));
+          return prev;
+        });
+        pending = true;
+      }
+      if (alive && pending) timer = setTimeout(load, LIST_POLL_MS);
+    }
+
+    function onVisible() {
+      if (document.visibilityState === 'visible') load();
+    }
+
+    load();
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [enabled]);
 

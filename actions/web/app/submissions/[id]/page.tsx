@@ -260,6 +260,7 @@ function Detail({ id }: { id: string }) {
   const [submission, setSubmission] = useState<SubmissionExtra | null>(null);
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const submissionLoaded = useRef(false);
 
   useEffect(() => {
     if (status !== 'authenticated') return;
@@ -270,16 +271,24 @@ function Detail({ id }: { id: string }) {
         const res = await fetch(`/api/submissions/${id}`, { cache: 'no-store' });
         const data = await res.json();
         if (!res.ok) {
+          // 已经在等结果时，偶发的 5xx 不打断轮询。
+          if (res.status >= 500 && !stopped && submissionLoaded.current) {
+            timer.current = setTimeout(poll, POLL_MS);
+            return;
+          }
           setError(res.status === 404 ? '提交记录不存在。' : zhError(data.error || `加载失败（${res.status}）`));
           return;
         }
+        submissionLoaded.current = true;
         if (stopped) return;
         setSubmission(data.submission);
         if (isPending(data.submission.status)) {
           timer.current = setTimeout(poll, POLL_MS);
         }
       } catch (err) {
-        if (!stopped) setError(String(err));
+        if (stopped) return;
+        if (submissionLoaded.current) timer.current = setTimeout(poll, POLL_MS);
+        else setError(String(err));
       }
     }
     poll();
