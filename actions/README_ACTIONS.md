@@ -326,6 +326,38 @@ self-test service's own credential, but the grader checks anyway
 - No key configured → the check no-ops (always passes). That's intentional
   for local `workflow_dispatch` testing; set the secret before going live.
 
+## Internal synthetic check
+
+A scheduled job (private ops repo, Actions `schedule` + `workflow_dispatch`,
+every 2 hours) submits a known-good fixture app through the real
+submit -> dispatch -> grade -> callback -> poll pipeline and checks the
+result matches what's expected, so a break shows up before a participant
+hits it. It needs its own way to submit and poll without a GitHub login and
+without spending a real participant's daily quota, so `actions/web` exposes
+two endpoints just for it:
+
+- `POST /api/internal/submit`, `GET /api/internal/submissions/<id>` —
+  otherwise identical to `/api/submit` and `/api/submissions/<id>`, except:
+  no session required, no `tryConsumeUserQuota`/`tryConsumeGlobalQuota`
+  call (so it never touches the per-user/global counters a real submission
+  consumes), and the submission is recorded under the fixed identity
+  `internal-selftest-checker` instead of a `githubId` — which the GET side
+  also uses to make sure this endpoint can only ever read back a submission
+  it created itself, never a participant's.
+- Both are gated on a shared secret: header `X-Internal-Key` must
+  timing-safe-equal the `INTERNAL_CHECK_KEY` env var
+  (`lib/internalCheck.ts`). **Unset by default** — with no key configured
+  both routes just return 403, so they're inert until someone deliberately
+  turns them on. Set the same value as the private repo's
+  `INTERNAL_CHECK_KEY` Actions secret; rotate by changing both together.
+- Unlike `/api/submit`, the internal submit path accepts unlisted/demo task
+  ids (it skips `isTaskListed`, keeping only `taskExists`) — the check's
+  fixture app targets `demo-todo`, which is intentionally hidden from the
+  participant-facing task list.
+- Neither route is linked from any page; a leaked key only grants "submit
+  one more fixture run and read it back" against this one fixed identity,
+  not access to any participant's app, quota, or result.
+
 ## Callback verification
 
 `report_back.py` POSTs `result.json` to `CALLBACK_URL` with three headers,

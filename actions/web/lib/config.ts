@@ -10,6 +10,7 @@ export const config = {
   graderRepoName: process.env.GRADER_REPO_NAME || '',
   graderServiceToken: process.env.GRADER_SERVICE_TOKEN || '',
   signingKey: process.env.SELFTEST_DISPATCH_SIGNING_KEY || '',
+  internalCheckKey: process.env.INTERNAL_CHECK_KEY || '',
 
   dailyLimitPerUser: int('SELFTEST_WEB_DAILY_LIMIT_PER_USER', 10),
   dailyLimitGlobal: int('SELFTEST_WEB_DAILY_LIMIT_GLOBAL', 200),
