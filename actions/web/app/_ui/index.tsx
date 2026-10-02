@@ -52,7 +52,9 @@ const SYSTEM_ZH: [RegExp, string][] = [
   [/produced no result|crashed or was killed/i, '评测任务异常中断，未产生结果。'],
   [/runner exited|no report|report\.json unreadable|no tests collected/i, '测试执行器异常退出。'],
   [/dispatch rejected/i, '评测请求未通过校验。'],
-  [/could not start grading/i, '评测任务未能启动。'],
+  [/could not (re)?start grading/i, '评测任务未能启动。'],
+  [/never started on GitHub Actions/i, '评测任务没有被执行（评测平台暂时无法运行任务）。'],
+  [/ended \(.*\) without delivering a result/i, '评测任务异常结束，未产生结果。'],
 ];
 
 /** system_error 的原因说明（中文）；评测超时等本来就是中文的原样返回。 */

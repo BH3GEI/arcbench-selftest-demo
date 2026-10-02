@@ -1,4 +1,10 @@
 name: Grade submission
+# The submission id in the run title is what lets the self-test web app find
+# the run for a given submission (actions/web/lib/github.ts findGradeRun):
+# confirm it started, or notice right away that it ended — or was never
+# started by GitHub at all — without delivering a result. Keep the
+# "Grade <submission_id>" shape.
+run-name: Grade ${{ github.event.client_payload.submission_id || inputs.submission_id }}
 
 # Two ways in:
 #  - repository_dispatch (event_type: grade-submission): the self-test

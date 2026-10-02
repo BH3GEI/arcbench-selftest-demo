@@ -92,28 +92,74 @@ export async function dispatchGrade(payload: {
 
 const GRADE_WORKFLOW_FILE = 'grade.yml';
 
-// Best-effort check for "did a dispatch for around this time actually
-// start a run" — repository_dispatch runs carry no queryable trace of
-// their client_payload (the Actions API never exposes it), so this can
-// only confirm that *some* grade-workflow run exists shortly after the
-// submission was created. That's still enough to catch the failure mode
-// this exists for (dispatch call looked fine but zero runs ever appear).
-// Fails open (reports a run as present) on its own errors so a GitHub API
-// hiccup here never triggers a redispatch storm.
-export async function hasRecentGradeRun(sinceMs: number): Promise<boolean> {
+type WorkflowRun = {
+  id: number;
+  display_title?: string;
+  status: string;
+  conclusion: string | null;
+  updated_at: string;
+};
+
+// grade.yml sets `run-name: Grade <submission_id>`, so a run can be matched
+// to its submission by its title. A grader whose workflow predates that
+// gives every run the default title ("grade-submission").
+const RUN_TITLE_HAS_ID = /\bGrade [A-Za-z0-9_-]{8,}/;
+
+// Grade-workflow runs (newest first) created since shortly before `sinceMs`
+// on the grader repo named by GRADER_REPO_OWNER/GRADER_REPO_NAME; null if
+// the Actions API couldn't be read.
+async function listGradeRuns(sinceMs: number): Promise<WorkflowRun[] | null> {
   const since = new Date(sinceMs - 30_000).toISOString();
   const url =
     `${API}/repos/${config.graderRepoOwner}/${config.graderRepoName}` +
     `/actions/workflows/${GRADE_WORKFLOW_FILE}/runs` +
-    `?event=repository_dispatch&per_page=20&created=${encodeURIComponent(`>${since}`)}`;
+    `?event=repository_dispatch&per_page=100&created=${encodeURIComponent(`>${since}`)}`;
   try {
     const res = await fetch(url, { headers: headers(), cache: 'no-store' });
-    if (!res.ok) return true;
-    const { workflow_runs } = (await res.json()) as { workflow_runs?: unknown[] };
-    return (workflow_runs?.length ?? 0) > 0;
+    if (!res.ok) return null;
+    const { workflow_runs } = (await res.json()) as { workflow_runs?: WorkflowRun[] };
+    return workflow_runs ?? [];
   } catch {
-    return true;
+    return null;
   }
+}
+
+// Best-effort check for "did the dispatch actually start a run". With
+// run-names (see RUN_TITLE_HAS_ID) the run is matched to this submission
+// exactly; against an older grader workflow it can only confirm that *some*
+// grade-workflow run exists shortly after the submission was created.
+// Fails open (reports a run as present) on its own errors so a GitHub API
+// hiccup here never triggers a redispatch storm.
+export async function hasRecentGradeRun(sinceMs: number, submissionId?: string): Promise<boolean> {
+  const runs = await listGradeRuns(sinceMs);
+  if (runs === null) return true;
+  if (submissionId && runs.some((r) => RUN_TITLE_HAS_ID.test(r.display_title ?? ''))) {
+    return runs.some((r) => (r.display_title ?? '').includes(submissionId));
+  }
+  return runs.length > 0;
+}
+
+export type GradeRun = { id: number; status: string; conclusion: string | null; updatedAt: number };
+
+/** The newest run titled with this submission id; null if none (or the
+ *  grader's workflow has no run-name), undefined if the API couldn't be read. */
+export async function findGradeRun(submissionId: string, sinceMs: number): Promise<GradeRun | null | undefined> {
+  const runs = await listGradeRuns(sinceMs);
+  if (runs === null) return undefined;
+  const run = runs.find((r) => (r.display_title ?? '').includes(submissionId));
+  if (!run) return null;
+  return { id: run.id, status: run.status, conclusion: run.conclusion, updatedAt: Date.parse(run.updated_at) };
+}
+
+/** True when none of the run's jobs executed a single step — GitHub refused
+ *  to start them (e.g. no Actions minutes left), as opposed to a job that ran
+ *  and failed. */
+export async function gradeRunNeverStarted(runId: number): Promise<boolean> {
+  const url = `${API}/repos/${config.graderRepoOwner}/${config.graderRepoName}/actions/runs/${runId}/jobs`;
+  const res = await fetch(url, { headers: headers(), cache: 'no-store' });
+  if (!res.ok) return false;
+  const { jobs } = (await res.json()) as { jobs?: { steps?: unknown[] }[] };
+  return Boolean(jobs?.length) && jobs!.every((j) => !j.steps?.length);
 }
 
 // Downloads the grader repo's newest unexpired artifact with this exact

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { dispatchGrade, hasRecentGradeRun } from '../lib/github';
+import { dispatchGrade, findGradeRun, hasRecentGradeRun } from '../lib/github';
 
 const basePayload = {
   submissionId: 'sub-1',
@@ -76,5 +76,42 @@ describe('hasRecentGradeRun — presence check used by the watchdog', () => {
   it('fails open on a non-ok HTTP response too', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 500 })));
     await expect(hasRecentGradeRun(Date.now())).resolves.toBe(true);
+  });
+});
+
+describe('run matching by run-name (grade.yml: run-name: Grade <submission_id>)', () => {
+  const runs = (titles: string[]) =>
+    new Response(
+      JSON.stringify({
+        workflow_runs: titles.map((t, i) => ({
+          id: i + 1,
+          display_title: t,
+          status: 'completed',
+          conclusion: 'failure',
+          updated_at: '2026-10-02T03:30:00Z',
+        })),
+      }),
+      { status: 200 },
+    );
+
+  it('only counts a run titled with this submission once run-names are in use', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(runs(['Grade other-submission-1'])));
+    await expect(hasRecentGradeRun(Date.now(), 'sub-1234-abcd')).resolves.toBe(false);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(runs(['Grade other-submission-1', 'Grade sub-1234-abcd'])));
+    await expect(hasRecentGradeRun(Date.now(), 'sub-1234-abcd')).resolves.toBe(true);
+  });
+
+  it('falls back to "any run" against a grader workflow without run-names', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(runs(['grade-submission'])));
+    await expect(hasRecentGradeRun(Date.now(), 'sub-1234-abcd')).resolves.toBe(true);
+  });
+
+  it('findGradeRun returns the matching run, null when untitled, undefined on API error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(runs(['Grade sub-1234-abcd'])));
+    await expect(findGradeRun('sub-1234-abcd', Date.now())).resolves.toMatchObject({ id: 1, status: 'completed' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(runs(['grade-submission'])));
+    await expect(findGradeRun('sub-1234-abcd', Date.now())).resolves.toBeNull();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
+    await expect(findGradeRun('sub-1234-abcd', Date.now())).resolves.toBeUndefined();
   });
 });

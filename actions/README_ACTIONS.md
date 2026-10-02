@@ -370,15 +370,23 @@ nothing happening) could sit at "queued" indefinitely with nobody polling.
 `GET /api/cron/reconcile` runs the same reconciliation over *every* queued
 submission, proactively:
 
+- From 1 minute on, look up *this submission's* run. `grade.yml` sets
+  `run-name: Grade <submission_id>`, so `findGradeRun` in `lib/github.ts`
+  matches runs by title on whatever repo `GRADER_REPO_OWNER` /
+  `GRADER_REPO_NAME` name. If that run has finished (45s grace for its
+  callback) and still no result arrived, recover the result artifact or
+  mark `system_error` + refund quota immediately (`checkRunEnded` in
+  `lib/store.ts`). This is how a run GitHub refuses to start at all (no
+  Actions minutes left: every job fails with zero steps) shows up within a
+  minute or two instead of 30. A grader whose workflow has no run-name
+  simply skips this step.
 - After 3 minutes, confirm a `grade.yml` run actually exists on the grader
-  repo (`hasRecentGradeRun` in `lib/github.ts`). Repository-dispatch runs
-  carry no queryable trace of their `client_payload`, so this can only
-  check that *some* run started around the right time — enough to catch
-  "zero runs ever appeared", not to disambiguate near-simultaneous
-  submissions. If none is found, redispatch exactly once
-  (`claimRedispatch`/`checkRunAndMaybeRedispatch` in `lib/store.ts`); if the
-  redispatch call itself fails, mark `system_error` and refund quota right
-  away instead of waiting out the full timeout.
+  repo (`hasRecentGradeRun` in `lib/github.ts`) — matched to this
+  submission by run-name when the grader's runs carry one, otherwise only
+  "*some* run started around the right time". If none is found, redispatch
+  exactly once (`claimRedispatch`/`checkRunAndMaybeRedispatch` in
+  `lib/store.ts`); if the redispatch call itself fails, mark `system_error`
+  and refund quota right away instead of waiting out the full timeout.
 - After 8 minutes, same artifact-recovery pull as the on-read path.
 - After 30 minutes with still nothing, `system_error` + quota refund.
 

@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { put, list, del } from '@vercel/blob';
 import type { Submission, GradeResult, SubmissionStatus } from './types';
-import { dispatchGrade, fetchGraderResult, fetchGraderScreenshots, hasRecentGradeRun } from './github';
+import {
+  dispatchGrade,
+  fetchGraderResult,
+  fetchGraderScreenshots,
+  findGradeRun,
+  gradeRunNeverStarted,
+  hasRecentGradeRun,
+} from './github';
 import { signDispatch } from './signature';
 
 // Vercel KV turned out to need a marketplace integration with an
@@ -33,6 +40,11 @@ import { signDispatch } from './signature';
 // only on read (a participant polling the page) meant a submission left
 // unattended just sat at "queued" forever, so it also runs proactively from
 // a scheduler (see /api/cron/reconcile) on every queued submission:
+//   - from RUN_ENDED_CHECK_AFTER_MS, if this submission's run (grade.yml's
+//     run-name carries the submission id) has already finished without a
+//     result reaching us — including a run GitHub never started, e.g. out of
+//     Actions minutes — recover its artifact or mark system_error right away
+//     (see checkRunEnded);
 //   - after RUN_CHECK_AFTER_MS, confirm a grade-workflow run actually exists
 //     on GitHub; if not, redispatch once (see reconcileQueued/claimRedispatch);
 //   - after RECOVER_AFTER_MS, pull the grade job's own result artifact from
@@ -41,6 +53,12 @@ import { signDispatch } from './signature';
 //     system_error that releases the quota slot. A late real result.json
 //     still wins over it (see assembleSubmission).
 const RUN_CHECK_AFTER_MS = 3 * 60 * 1000;
+// Once the submission's own run (matched by run-name) has finished, its
+// callback normally lands within seconds; after this grace with still no
+// result, the run is over and nothing more will come.
+const RUN_ENDED_CHECK_AFTER_MS = 60 * 1000;
+const RUN_ENDED_GRACE_MS = 45 * 1000;
+const RUN_ENDED_RETRY_MS = 30 * 1000;
 const RECOVER_AFTER_MS = 8 * 60 * 1000;
 const RECOVER_RETRY_MS = 60 * 1000;
 const STALE_AFTER_MS = 30 * 60 * 1000;
@@ -216,7 +234,7 @@ async function checkRunAndMaybeRedispatch(created: StoredCreated): Promise<Submi
   if (age < RUN_CHECK_AFTER_MS) return null;
   if (!(await claimRedispatch(created.id))) return null;
 
-  const hasRun = await hasRecentGradeRun(created.createdAt);
+  const hasRun = await hasRecentGradeRun(created.createdAt, created.id);
   if (hasRun) return null;
 
   try {
@@ -242,6 +260,9 @@ async function checkRunAndMaybeRedispatch(created: StoredCreated): Promise<Submi
 const lastRecoveryAttempt = new Map<string, number>();
 
 async function reconcile(created: StoredCreated): Promise<Submission | null> {
+  const ended = await checkRunEnded(created);
+  if (ended) return ended;
+
   const redispatched = await checkRunAndMaybeRedispatch(created);
   if (redispatched) return redispatched;
 
@@ -260,7 +281,12 @@ async function reconcile(created: StoredCreated): Promise<Submission | null> {
   }
 
   if (age < STALE_AFTER_MS) return null;
-  const minutes = Math.round(STALE_AFTER_MS / 60000);
+  return giveUp(created, `评测超时：${Math.round(STALE_AFTER_MS / 60000)} 分钟内未收到评测结果。`);
+}
+
+// No result is coming: record a system_error (doesn't count, quota slot
+// released). Written as timeout.json, so a late real result.json still wins.
+async function giveUp(created: StoredCreated, detail: string): Promise<Submission> {
   const result: GradeResult = {
     submission_id: created.id,
     task_id: created.taskId,
@@ -268,13 +294,38 @@ async function reconcile(created: StoredCreated): Promise<Submission | null> {
     status: 'system_error',
     passed: 0,
     total: 0,
-    detail: `评测超时：${minutes} 分钟内未收到评测结果。`,
+    detail,
   };
   const timeout: StoredResult = { status: 'system_error', result, updatedAt: Date.now() };
   if (await writeOnce(`${submissionDir(created.id)}timeout.json`, timeout)) {
     await releaseQuotaMarkers(created);
   }
   return assembleSubmission(created, null, timeout);
+}
+
+const lastRunEndedCheck = new Map<string, number>();
+
+async function checkRunEnded(created: StoredCreated): Promise<Submission | null> {
+  if (Date.now() - created.createdAt < RUN_ENDED_CHECK_AFTER_MS) return null;
+  if (Date.now() - (lastRunEndedCheck.get(created.id) ?? 0) < RUN_ENDED_RETRY_MS) return null;
+  lastRunEndedCheck.set(created.id, Date.now());
+
+  const run = await findGradeRun(created.id, created.createdAt).catch(() => undefined);
+  if (!run || run.status !== 'completed' || Date.now() - run.updatedAt < RUN_ENDED_GRACE_MS) return null;
+
+  const recovered = await fetchGraderResult(created.id).catch(() => null);
+  if (recovered && recovered.submission_id === created.id) {
+    await recordResult(created.id, recovered);
+    const fresh = await getStoredSubmission(created.id);
+    if (fresh && fresh.status !== 'queued') return fresh;
+  }
+  const neverStarted = await gradeRunNeverStarted(run.id).catch(() => false);
+  return giveUp(
+    created,
+    neverStarted
+      ? `grading never started on GitHub Actions (run ${run.id})`
+      : `grade run ${run.id} ended (${run.conclusion ?? 'unknown'}) without delivering a result`,
+  );
 }
 
 async function loadSubmission(urls: BlobUrls): Promise<{ created: StoredCreated; sub: Submission } | null> {

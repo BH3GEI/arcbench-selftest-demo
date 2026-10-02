@@ -9,6 +9,8 @@ const githubMocks = vi.hoisted(() => ({
   fetchGraderResult: vi.fn(),
   fetchGraderScreenshots: vi.fn(),
   hasRecentGradeRun: vi.fn(),
+  findGradeRun: vi.fn(),
+  gradeRunNeverStarted: vi.fn(),
   listTaskIds: vi.fn(),
   taskExists: vi.fn(),
 }));
@@ -42,6 +44,8 @@ beforeEach(() => {
   githubMocks.fetchGraderResult.mockReset().mockResolvedValue(null);
   githubMocks.fetchGraderScreenshots.mockReset().mockResolvedValue(new Map());
   githubMocks.hasRecentGradeRun.mockReset().mockResolvedValue(true);
+  githubMocks.findGradeRun.mockReset().mockResolvedValue(null);
+  githubMocks.gradeRunNeverStarted.mockReset().mockResolvedValue(false);
 });
 
 describe('scenario: the grade-workflow run never appears on GitHub (dispatch "succeeded" but nothing was triggered)', () => {
@@ -167,5 +171,64 @@ describe('reconcileQueued — the cron entry point', () => {
     const summary = await reconcileQueued();
     expect(summary.checked).toBe(2);
     expect(summary.stillQueued).toBe(2);
+  });
+});
+
+describe('scenario: the submission\'s own run (matched by run-name) finished but no result arrived', () => {
+  it('marks system_error within minutes, refunds quota, when GitHub never started the run (e.g. out of Actions minutes)', async () => {
+    const createdAt = Date.now() - 2 * 60 * 1000;
+    const quotaMarker = 'state/quota/user-gh-1/marker-ended.json';
+    await fakeBlob.put(quotaMarker, '1');
+    await createSubmission(makeSubmission({ id: 'run-ended-1', createdAt }), EXTRA, [quotaMarker]);
+    githubMocks.findGradeRun.mockResolvedValue({
+      id: 42,
+      status: 'completed',
+      conclusion: 'failure',
+      updatedAt: Date.now() - 90 * 1000,
+    });
+    githubMocks.gradeRunNeverStarted.mockResolvedValue(true);
+
+    const sub = await getSubmission('run-ended-1');
+    expect(sub?.status).toBe('system_error');
+    expect(sub?.result?.detail).toMatch(/never started on GitHub Actions/);
+    expect(fakeBlob.blobs.has(quotaMarker)).toBe(false);
+    expect(githubMocks.dispatchGrade).not.toHaveBeenCalled();
+  });
+
+  it('recovers the real result from the artifact instead, when the run produced one', async () => {
+    const createdAt = Date.now() - 2 * 60 * 1000;
+    await createSubmission(makeSubmission({ id: 'run-ended-2', createdAt }), EXTRA);
+    githubMocks.findGradeRun.mockResolvedValue({
+      id: 43,
+      status: 'completed',
+      conclusion: 'success',
+      updatedAt: Date.now() - 90 * 1000,
+    });
+    githubMocks.fetchGraderResult.mockResolvedValue({
+      submission_id: 'run-ended-2',
+      task_id: 'demo-todo',
+      visibility: 'public',
+      status: 'passed',
+      passed: 5,
+      total: 5,
+      detail: '',
+    });
+
+    const sub = await getSubmission('run-ended-2');
+    expect(sub?.status).toBe('passed');
+  });
+
+  it('keeps waiting while the run is still in progress or only just finished', async () => {
+    const createdAt = Date.now() - 2 * 60 * 1000;
+    await createSubmission(makeSubmission({ id: 'run-ended-3', createdAt }), EXTRA);
+    githubMocks.findGradeRun.mockResolvedValue({
+      id: 44,
+      status: 'completed',
+      conclusion: 'success',
+      updatedAt: Date.now() - 5 * 1000, // callback may still be in flight
+    });
+
+    const sub = await getSubmission('run-ended-3');
+    expect(sub?.status).toBe('queued');
   });
 });
