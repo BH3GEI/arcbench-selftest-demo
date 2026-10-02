@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
-import { put } from '@vercel/blob';
+import { put } from '@/lib/r2';
 import { config } from '@/lib/config';
 import { taskExists, dispatchGrade } from '@/lib/github';
 import { signDispatch } from '@/lib/signature';

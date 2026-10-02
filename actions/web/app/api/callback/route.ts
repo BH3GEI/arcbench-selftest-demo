@@ -1,5 +1,5 @@
 import { NextResponse, after } from 'next/server';
-import { del } from '@vercel/blob';
+import { del } from '@/lib/r2';
 import { verifyCallbackSignature } from '@/lib/signature';
 import { getSubmission, recordResult, claimCallbackNonce, cacheScreenshots } from '@/lib/store';
 import type { GradeResult } from '@/lib/types';

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { put, list, del } from '@vercel/blob';
+import { put, list, del } from './r2';
 import type { Submission, GradeResult, SubmissionStatus } from './types';
 import {
   dispatchGrade,

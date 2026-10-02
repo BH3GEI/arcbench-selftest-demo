@@ -1,9 +1,7 @@
-import { del, head, issueSignedToken, presignUrl } from '@vercel/blob';
+import { del, head, presignPut } from './r2';
 import { config } from './config';
 
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
-// Browsers label .zip files differently (Windows: x-zip-compressed).
-const ZIP_CONTENT_TYPES = ['application/zip', 'application/x-zip-compressed', 'application/octet-stream'];
 const UPLOAD_URL_TTL_MS = 15 * 60 * 1000;
 
 export function uploadPathname(id: string): string {
@@ -14,27 +12,10 @@ export function maxZipBytes(): number {
   return config.maxZipMb * 1024 * 1024;
 }
 
-/** A one-off URL the browser can PUT exactly this zip to: fixed pathname, no
- *  overwrite, size and content type enforced by Blob itself. Works with the
- *  project's OIDC Blob credentials (no read-write token needed). */
+/** A one-off presigned URL the browser can PUT this zip to (fixed pathname,
+ *  15 minutes). Size and zip header are re-checked in checkUploadedZip. */
 export async function presignZipUpload(id: string): Promise<string> {
-  const pathname = uploadPathname(id);
-  const limits = { allowedContentTypes: ZIP_CONTENT_TYPES, maximumSizeInBytes: maxZipBytes() };
-  const token = await issueSignedToken({
-    pathname,
-    operations: ['put'],
-    validUntil: Date.now() + UPLOAD_URL_TTL_MS,
-    ...limits,
-  });
-  const { presignedUrl } = await presignUrl(token, {
-    operation: 'put',
-    pathname,
-    access: 'public',
-    addRandomSuffix: false,
-    allowOverwrite: false,
-    ...limits,
-  });
-  return presignedUrl;
+  return presignPut(uploadPathname(id), UPLOAD_URL_TTL_MS / 1000);
 }
 
 export type UploadCheck = { ok: true; url: string } | { ok: false; error: string; status: number };
