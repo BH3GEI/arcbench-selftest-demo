@@ -358,6 +358,45 @@ two endpoints just for it:
   one more fixture run and read it back" against this one fixed identity,
   not access to any participant's app, quota, or result.
 
+## Watchdog: no submission stays queued forever
+
+Reconciling a stuck submission used to happen only on read (`getSubmission`
+reconciles a `queued` record it's about to return) — fine as long as the
+participant keeps the page open, useless if they close the tab. A dispatch
+whose GitHub API call "succeeded" but never actually produced a run on the
+grader repo (the failure this was built for — no error anywhere, just
+nothing happening) could sit at "queued" indefinitely with nobody polling.
+
+`GET /api/cron/reconcile` runs the same reconciliation over *every* queued
+submission, proactively:
+
+- After 3 minutes, confirm a `grade.yml` run actually exists on the grader
+  repo (`hasRecentGradeRun` in `lib/github.ts`). Repository-dispatch runs
+  carry no queryable trace of their `client_payload`, so this can only
+  check that *some* run started around the right time — enough to catch
+  "zero runs ever appeared", not to disambiguate near-simultaneous
+  submissions. If none is found, redispatch exactly once
+  (`claimRedispatch`/`checkRunAndMaybeRedispatch` in `lib/store.ts`); if the
+  redispatch call itself fails, mark `system_error` and refund quota right
+  away instead of waiting out the full timeout.
+- After 8 minutes, same artifact-recovery pull as the on-read path.
+- After 30 minutes with still nothing, `system_error` + quota refund.
+
+`dispatchGrade` itself also retries once on any non-204 response (or a
+thrown network error) before giving up, logging the reason either way.
+
+**Trigger.** Vercel's own Cron Jobs are capped at once/day on the Hobby
+plan this project runs on — any sub-daily schedule fails to deploy, so a
+real 5-minute cadence can't come from `vercel.json` alone. The actual timer
+is `.github/workflows/selftest-watchdog.yml` (GitHub Actions `schedule`,
+every 5 minutes) calling the route with
+`Authorization: Bearer ${{ secrets.SELFTEST_CRON_SECRET }}`; `vercel.json`
+still carries a once-daily cron hitting the same route as a backstop in
+case that workflow is ever suspended (GitHub disables schedules after 60
+days of repo inactivity). Set `CRON_SECRET` (Vercel project env) and the
+repo secret `SELFTEST_CRON_SECRET` to the same value — empty disables the
+auth check (local dev only).
+
 ## Callback verification
 
 `report_back.py` POSTs `result.json` to `CALLBACK_URL` with three headers,

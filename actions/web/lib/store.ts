@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { put, list, del } from '@vercel/blob';
 import type { Submission, GradeResult, SubmissionStatus } from './types';
-import { fetchGraderResult, fetchGraderScreenshots } from './github';
+import { dispatchGrade, fetchGraderResult, fetchGraderScreenshots, hasRecentGradeRun } from './github';
+import { signDispatch } from './signature';
 
 // Vercel KV turned out to need a marketplace integration with an
 // interactive "accept terms" step (no non-interactive provisioning path),
@@ -26,14 +27,20 @@ import { fetchGraderResult, fetchGraderScreenshots } from './github';
 //
 // A result can also be missing because the grader never managed to deliver
 // it: a callback rejected by a signature mismatch during a key rotation, a
-// grade job cancelled before it reported, a dispatch the grader refused.
-// Nothing would ever arrive and the page would say "queued" forever, so a
-// queued submission is reconciled on read:
+// grade job cancelled before it reported, a dispatch the grader refused,
+// or — the failure mode this was built for — a dispatch call that reported
+// success but never actually created a run on the grader repo. Reconciling
+// only on read (a participant polling the page) meant a submission left
+// unattended just sat at "queued" forever, so it also runs proactively from
+// a scheduler (see /api/cron/reconcile) on every queued submission:
+//   - after RUN_CHECK_AFTER_MS, confirm a grade-workflow run actually exists
+//     on GitHub; if not, redispatch once (see reconcileQueued/claimRedispatch);
 //   - after RECOVER_AFTER_MS, pull the grade job's own result artifact from
 //     the grader repo (same file the report job would have POSTed);
 //   - after STALE_AFTER_MS with still nothing, write `timeout.json` — a
 //     system_error that releases the quota slot. A late real result.json
 //     still wins over it (see assembleSubmission).
+const RUN_CHECK_AFTER_MS = 3 * 60 * 1000;
 const RECOVER_AFTER_MS = 8 * 60 * 1000;
 const RECOVER_RETRY_MS = 60 * 1000;
 const STALE_AFTER_MS = 30 * 60 * 1000;
@@ -43,19 +50,29 @@ function submissionDir(id: string): string {
 }
 
 type StoredCreated = Omit<Submission, 'status' | 'result' | 'updatedAt'> & {
+  // Needed to redispatch from the cron reconciler without the participant
+  // involved — never sent to the browser (not part of the Submission type).
+  downloadUrl: string;
+  callbackUrl: string;
   // Quota marker paths consumed by this submission, released if the
   // platform (not the participant) fails it. Never sent to the browser.
   quotaMarkers?: string[];
 };
 type StoredResult = { status: SubmissionStatus; result: GradeResult; updatedAt: number };
 
-export async function createSubmission(sub: Submission, quotaMarkers: (string | null)[] = []): Promise<void> {
+export async function createSubmission(
+  sub: Submission,
+  extra: { downloadUrl: string; callbackUrl: string },
+  quotaMarkers: (string | null)[] = [],
+): Promise<void> {
   const created: StoredCreated = {
     id: sub.id,
     githubId: sub.githubId,
     githubLogin: sub.githubLogin,
     taskId: sub.taskId,
     createdAt: sub.createdAt,
+    downloadUrl: extra.downloadUrl,
+    callbackUrl: extra.callbackUrl,
     quotaMarkers: quotaMarkers.filter((m): m is string => Boolean(m)),
   };
   await put(`${submissionDir(sub.id)}created.json`, JSON.stringify(created), {
@@ -159,9 +176,75 @@ async function readCreated(id: string): Promise<StoredCreated | null> {
   return created ? fetchJson<StoredCreated>(created) : null;
 }
 
+// Redispatch marker, same first-write-wins trick as writeOnce: claiming it
+// is both "only try this once per submission" and a race guard against two
+// cron ticks (or a cron tick and a page read) both deciding to redispatch.
+async function claimRedispatch(id: string): Promise<boolean> {
+  try {
+    await put(`${submissionDir(id)}redispatch.json`, String(Date.now()), {
+      access: 'public',
+      addRandomSuffix: false,
+      contentType: 'application/json',
+    });
+    return true;
+  } catch (err) {
+    if (/already exists/i.test(String(err))) return false;
+    throw err;
+  }
+}
+
+async function redispatchSubmission(created: StoredCreated): Promise<void> {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = signDispatch(created.id, created.taskId, timestamp);
+  await dispatchGrade({
+    submissionId: created.id,
+    taskId: created.taskId,
+    downloadUrl: created.downloadUrl,
+    callbackUrl: created.callbackUrl,
+    timestamp,
+    signature,
+  });
+}
+
+// After RUN_CHECK_AFTER_MS, confirm the original dispatch actually produced
+// a run on the grader repo; if not, redispatch exactly once. A redispatch
+// that itself fails (GitHub API down, bad token, etc.) is a platform fault
+// known right now — no reason to make the participant wait out the full
+// STALE_AFTER_MS for the same answer.
+async function checkRunAndMaybeRedispatch(created: StoredCreated): Promise<Submission | null> {
+  const age = Date.now() - created.createdAt;
+  if (age < RUN_CHECK_AFTER_MS) return null;
+  if (!(await claimRedispatch(created.id))) return null;
+
+  const hasRun = await hasRecentGradeRun(created.createdAt);
+  if (hasRun) return null;
+
+  try {
+    await redispatchSubmission(created);
+    console.error(`reconcile: redispatched ${created.id} — no grade-workflow run was found after ${age}ms`);
+    return null;
+  } catch (err) {
+    console.error(`reconcile: redispatch failed for ${created.id}: ${String(err)}`);
+    const result: GradeResult = {
+      submission_id: created.id,
+      task_id: created.taskId,
+      visibility: 'public',
+      status: 'system_error',
+      passed: 0,
+      total: 0,
+      detail: `could not restart grading after the original dispatch produced no run: ${String(err)}`,
+    };
+    await recordResult(created.id, result);
+    return getStoredSubmission(created.id);
+  }
+}
+
 const lastRecoveryAttempt = new Map<string, number>();
 
 async function reconcile(created: StoredCreated): Promise<Submission | null> {
+  const redispatched = await checkRunAndMaybeRedispatch(created);
+  if (redispatched) return redispatched;
+
   const age = Date.now() - created.createdAt;
   if (age < RECOVER_AFTER_MS) return null;
 
@@ -219,7 +302,7 @@ export async function getSubmission(id: string): Promise<Submission | null> {
   return withReconcile(await loadSubmission(await urlsFor(id)));
 }
 
-export async function listUserSubmissions(githubId: string, limit = 50): Promise<Submission[]> {
+async function allSubmissions(): Promise<{ created: StoredCreated; sub: Submission }[]> {
   const byId = new Map<string, BlobUrls>();
   for (const b of await listAll('state/submissions/')) {
     const rest = b.pathname.slice('state/submissions/'.length);
@@ -230,10 +313,24 @@ export async function listUserSubmissions(githubId: string, limit = 50): Promise
     entry[key] = b.url;
     byId.set(id, entry);
   }
-
   const loaded = await Promise.all(Array.from(byId.values()).map(loadSubmission));
-  const mine = loaded
-    .filter((l): l is { created: StoredCreated; sub: Submission } => l !== null && l.created.githubId === githubId)
+  return loaded.filter((l): l is { created: StoredCreated; sub: Submission } => l !== null);
+}
+
+// Called by /api/cron/reconcile so stuck submissions get checked on a
+// schedule, not only when a participant happens to have the page open.
+export type ReconcileSummary = { checked: number; stillQueued: number };
+
+export async function reconcileQueued(): Promise<ReconcileSummary> {
+  const queued = (await allSubmissions()).filter((l) => l.sub.status === 'queued');
+  const results = await Promise.all(queued.map((l) => reconcile(l.created)));
+  const stillQueued = results.filter((r) => r === null || r.status === 'queued').length;
+  return { checked: queued.length, stillQueued };
+}
+
+export async function listUserSubmissions(githubId: string, limit = 50): Promise<Submission[]> {
+  const mine = (await allSubmissions())
+    .filter((l) => l.created.githubId === githubId)
     .sort((a, b) => b.created.createdAt - a.created.createdAt)
     .slice(0, limit);
   const subs = await Promise.all(mine.map(withReconcile));

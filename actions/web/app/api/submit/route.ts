@@ -66,9 +66,13 @@ export async function POST(req: Request) {
     );
   }
 
+  const baseUrl = process.env.NEXTAUTH_URL || new URL(req.url).origin;
+  const callbackUrl = `${baseUrl}/api/callback`;
+
   // Written *before* dispatching: the grader can finish and call back
   // faster than you'd expect, and the callback looks this record up by id
-  // — it must already exist.
+  // — it must already exist. downloadUrl/callbackUrl are kept here too so
+  // the cron reconciler can redispatch later without the participant.
   const now = Date.now();
   try {
     await createSubmission(
@@ -82,6 +86,7 @@ export async function POST(req: Request) {
         updatedAt: now,
         result: null,
       },
+      { downloadUrl: blobUrl, callbackUrl },
       [userQuota.markerPath, globalQuota.markerPath],
     );
   } catch (err) {
@@ -93,8 +98,6 @@ export async function POST(req: Request) {
     throw err;
   }
 
-  const baseUrl = process.env.NEXTAUTH_URL || new URL(req.url).origin;
-  const callbackUrl = `${baseUrl}/api/callback`;
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = signDispatch(submissionId, taskId, timestamp);
 

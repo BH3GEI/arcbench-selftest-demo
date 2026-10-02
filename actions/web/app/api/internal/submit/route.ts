@@ -54,20 +54,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `upload failed: ${String(err)}` }, { status: 502 });
   }
 
-  const now = Date.now();
-  await createSubmission({
-    id: submissionId,
-    githubId: INTERNAL_CHECK_GITHUB_ID,
-    githubLogin: INTERNAL_CHECK_GITHUB_ID,
-    taskId,
-    createdAt: now,
-    status: 'queued',
-    updatedAt: now,
-    result: null,
-  });
-
   const baseUrl = process.env.NEXTAUTH_URL || new URL(req.url).origin;
   const callbackUrl = `${baseUrl}/api/callback`;
+
+  const now = Date.now();
+  await createSubmission(
+    {
+      id: submissionId,
+      githubId: INTERNAL_CHECK_GITHUB_ID,
+      githubLogin: INTERNAL_CHECK_GITHUB_ID,
+      taskId,
+      createdAt: now,
+      status: 'queued',
+      updatedAt: now,
+      result: null,
+    },
+    { downloadUrl: blobUrl, callbackUrl },
+  );
+
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = signDispatch(submissionId, taskId, timestamp);
 

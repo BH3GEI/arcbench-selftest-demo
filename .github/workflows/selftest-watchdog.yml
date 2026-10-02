@@ -1,0 +1,35 @@
+name: Self-test watchdog
+
+# Vercel's own Cron Jobs are capped at once/day on the Hobby plan (any
+# sub-daily schedule fails to deploy), so the 5-minute proactive check for
+# stuck "queued" submissions (see actions/web/app/api/cron/reconcile)
+# is driven from here instead — GitHub Actions scheduled workflows have no
+# such cap. vercel.json still carries a once-daily cron as a backstop in
+# case this workflow is ever suspended (GitHub disables schedules after 60
+# days with no repo activity).
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call /api/cron/reconcile
+        env:
+          CRON_SECRET: ${{ secrets.SELFTEST_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/reconcile.json -w '%{http_code}' \
+            --max-time 60 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://arcbench-selftest-web.vercel.app/api/cron/reconcile")
+          echo "http_status=$code"
+          cat /tmp/reconcile.json
+          echo
+          if [ "$code" != "200" ]; then
+            echo "reconcile call failed with status $code" >&2
+            exit 1
+          fi

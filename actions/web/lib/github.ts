@@ -33,6 +33,24 @@ export async function taskExists(taskId: string): Promise<boolean> {
   return ids.includes(taskId);
 }
 
+// The dispatches endpoint always answers 204 on success; anything else
+// (including a thrown network error) is a failure worth one immediate
+// retry before giving up — a single dropped connection or transient 5xx
+// shouldn't be enough to strand a submission in "queued" forever.
+async function postDispatch(
+  url: string,
+  reqHeaders: Record<string, string>,
+  body: string,
+): Promise<{ ok: boolean; status: number; detail: string }> {
+  try {
+    const res = await fetch(url, { method: 'POST', headers: reqHeaders, body });
+    if (res.status === 204) return { ok: true, status: 204, detail: '' };
+    return { ok: false, status: res.status, detail: await res.text().catch(() => '') };
+  } catch (err) {
+    return { ok: false, status: 0, detail: String(err) };
+  }
+}
+
 export async function dispatchGrade(payload: {
   submissionId: string;
   taskId: string;
@@ -42,23 +60,59 @@ export async function dispatchGrade(payload: {
   signature: string;
 }): Promise<void> {
   const url = `${API}/repos/${config.graderRepoOwner}/${config.graderRepoName}/dispatches`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { ...headers(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      event_type: 'grade-submission',
-      client_payload: {
-        submission_id: payload.submissionId,
-        task_id: payload.taskId,
-        download_url: payload.downloadUrl,
-        callback_url: payload.callbackUrl,
-        submission_timestamp: String(payload.timestamp),
-        submission_signature: payload.signature,
-      },
-    }),
+  const reqHeaders = { ...headers(), 'Content-Type': 'application/json' };
+  const body = JSON.stringify({
+    event_type: 'grade-submission',
+    client_payload: {
+      submission_id: payload.submissionId,
+      task_id: payload.taskId,
+      download_url: payload.downloadUrl,
+      callback_url: payload.callbackUrl,
+      submission_timestamp: String(payload.timestamp),
+      submission_signature: payload.signature,
+    },
   });
-  if (!res.ok) {
-    throw new Error(`dispatchGrade: GitHub API ${res.status}: ${await res.text()}`);
+
+  let result = await postDispatch(url, reqHeaders, body);
+  if (!result.ok) {
+    console.error(
+      `dispatchGrade: attempt 1 for ${payload.submissionId} failed (status ${result.status}): ${result.detail}`,
+    );
+    result = await postDispatch(url, reqHeaders, body);
+  }
+  if (!result.ok) {
+    console.error(
+      `dispatchGrade: attempt 2 for ${payload.submissionId} failed (status ${result.status}): ${result.detail}`,
+    );
+    throw new Error(
+      `dispatchGrade: GitHub API did not return 204 after retry (last status ${result.status}): ${result.detail}`,
+    );
+  }
+}
+
+const GRADE_WORKFLOW_FILE = 'grade.yml';
+
+// Best-effort check for "did a dispatch for around this time actually
+// start a run" — repository_dispatch runs carry no queryable trace of
+// their client_payload (the Actions API never exposes it), so this can
+// only confirm that *some* grade-workflow run exists shortly after the
+// submission was created. That's still enough to catch the failure mode
+// this exists for (dispatch call looked fine but zero runs ever appear).
+// Fails open (reports a run as present) on its own errors so a GitHub API
+// hiccup here never triggers a redispatch storm.
+export async function hasRecentGradeRun(sinceMs: number): Promise<boolean> {
+  const since = new Date(sinceMs - 30_000).toISOString();
+  const url =
+    `${API}/repos/${config.graderRepoOwner}/${config.graderRepoName}` +
+    `/actions/workflows/${GRADE_WORKFLOW_FILE}/runs` +
+    `?event=repository_dispatch&per_page=20&created=${encodeURIComponent(`>${since}`)}`;
+  try {
+    const res = await fetch(url, { headers: headers(), cache: 'no-store' });
+    if (!res.ok) return true;
+    const { workflow_runs } = (await res.json()) as { workflow_runs?: unknown[] };
+    return (workflow_runs?.length ?? 0) > 0;
+  } catch {
+    return true;
   }
 }
 
