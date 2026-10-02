@@ -60,7 +60,7 @@ function sign(method: string, url: URL, opts: { query?: number; headers?: Record
 async function r2fetch(method: string, url: string, headers: Record<string, string> = {}, body?: Buffer) {
   const u = new URL(url);
   const s = sign(method, u, { headers, payloadHash: body ? sha256(body) : undefined });
-  return fetch(s.url, { method, headers: s.headers, body, cache: 'no-store' });
+  return fetch(s.url, { method, headers: s.headers, body: body ? new Uint8Array(body) : undefined, cache: 'no-store' });
 }
 
 function objectUrl(pathname: string): string {
